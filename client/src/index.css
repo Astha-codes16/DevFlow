@@ -1,0 +1,57 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-[#0a0d14] text-slate-100 font-sans antialiased min-h-screen selection:bg-devflow-500/30 selection:text-white;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0d121f;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #1e293b;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #334155;
+  }
+}
+
+/* Utility badge and priority styling */
+.badge-bug {
+  @apply bg-rose-500/15 text-rose-400 border border-rose-500/30;
+}
+.badge-feature {
+  @apply bg-emerald-500/15 text-emerald-400 border border-emerald-500/30;
+}
+.badge-improvement {
+  @apply bg-cyan-500/15 text-cyan-400 border border-cyan-500/30;
+}
+.badge-documentation {
+  @apply bg-purple-500/15 text-purple-400 border border-purple-500/30;
+}
+.badge-task {
+  @apply bg-amber-500/15 text-amber-400 border border-amber-500/30;
+}
+
+.priority-critical {
+  @apply text-red-400 bg-red-950/40 border border-red-500/30;
+}
+.priority-high {
+  @apply text-orange-400 bg-orange-950/40 border border-orange-500/30;
+}
+.priority-medium {
+  @apply text-yellow-400 bg-yellow-950/40 border border-yellow-500/30;
+}
+.priority-low {
+  @apply text-slate-400 bg-slate-800/60 border border-slate-700/50;
+}

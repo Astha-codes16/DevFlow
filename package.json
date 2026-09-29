@@ -1,0 +1,17 @@
+{
+  "name": "devflow-ai",
+  "version": "1.0.0",
+  "description": "DevFlow AI - AI-Powered Developer Issue & Resolution Platform",
+  "private": true,
+  "scripts": {
+    "server": "npm --prefix server start",
+    "server:dev": "npm --prefix server run dev",
+    "client": "npm --prefix client run dev",
+    "test": "npm --prefix server test",
+    "seed": "npm --prefix server run seed",
+    "build": "npm --prefix client run build"
+  },
+  "dependencies": {
+    "ngrok": "^5.0.0-beta.2"
+  }
+}
