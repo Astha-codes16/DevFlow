@@ -97,7 +97,9 @@ export default function CreateIssueModal({ isOpen, onClose, onCreated }) {
       setError('Please select or create an active project first.');
       return;
     }
-    if (!title.trim() || !description.trim()) {
+    const normalizedTitle = title.trim();
+    const normalizedDescription = description.trim();
+    if (normalizedTitle.length < 3 || normalizedDescription.length < 5) {
       setError('Title and description are required.');
       return;
     }
@@ -112,8 +114,8 @@ export default function CreateIssueModal({ isOpen, onClose, onCreated }) {
         .filter(Boolean);
 
       const res = await api.post('/issues', {
-        title,
-        description,
+        title: normalizedTitle,
+        description: normalizedDescription,
         type,
         priority,
         labels: labelArray,
@@ -122,24 +124,35 @@ export default function CreateIssueModal({ isOpen, onClose, onCreated }) {
       });
 
       const newIssue = res.data.issue;
+      let creationWarning = '';
 
       // If user ran AI analysis, also persist it to the issue
       if (analysisResult) {
-        await api.post('/ai/analyze-issue', {
-          issueId: newIssue._id,
-          title,
-          description,
-        });
+        try {
+          await api.post('/ai/analyze-issue', {
+            issueId: newIssue._id,
+            title: normalizedTitle,
+            description: normalizedDescription,
+          });
+        } catch (analysisError) {
+          console.warn('Issue created, but AI analysis could not be saved:', analysisError);
+          creationWarning = 'Issue created, but AI analysis could not be saved.';
+        }
       }
 
       onClose();
       if (onCreated) {
-        onCreated(newIssue);
+        onCreated(newIssue, creationWarning);
       } else {
         navigate(`/issues/${newIssue._id}`);
       }
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to create issue');
+      const validationErrors = err.response?.data?.errors;
+      setError(
+        validationErrors?.length
+          ? validationErrors.map((item) => `${item.field}: ${item.message}`).join('; ')
+          : err.response?.data?.message || 'Failed to create issue'
+      );
     } finally {
       setSubmitting(false);
     }

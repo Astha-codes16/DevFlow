@@ -10,6 +10,7 @@ import {
   getPullRequestCommits,
   linkPullRequestToIssue,
   unlinkPullRequestFromIssue,
+  simulateGitHubWebhook,
   handleGitHubWebhook,
 } from '../controllers/githubController.js';
 import { authenticateUser } from '../middleware/auth.js';
@@ -23,6 +24,7 @@ router.post('/webhook', handleGitHubWebhook);
 router.get('/projects/:projectId/github', authenticateUser, getConnectedRepository);
 router.post('/projects/:projectId/github/connect', authenticateUser, connectRepository);
 router.delete('/projects/:projectId/github/disconnect', authenticateUser, disconnectRepository);
+router.post('/simulate-webhook', authenticateUser, simulateGitHubWebhook);
 
 router.get('/projects/:projectId/github/pulls', authenticateUser, getProjectPullRequests);
 router.get('/projects/:projectId/github/branches', authenticateUser, getRepositoryBranches);

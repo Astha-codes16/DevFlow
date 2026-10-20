@@ -11,7 +11,7 @@ const router = Router();
 router.use(authenticateUser);
 
 router.get('/', getNotifications);
-router.patch('/:id/read', markAsRead);
 router.patch('/mark-all-read', markAllAsRead);
+router.patch('/:id/read', markAsRead);
 
 export default router;

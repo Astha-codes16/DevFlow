@@ -1,15 +1,11 @@
 import { Issue } from '../models/Issue.js';
-import { Project } from '../models/Project.js';
 import { generateProjectInsights } from '../services/ai/projectInsights.js';
+import { requireProjectAccess } from '../middleware/projectAccess.js';
 
 export const getProjectAnalytics = async (req, res, next) => {
   try {
     const { projectId } = req.params;
-
-    const project = await Project.findById(projectId);
-    if (!project) {
-      return res.status(404).json({ success: false, message: 'Project not found' });
-    }
+    await requireProjectAccess(projectId, req.user);
 
     const issues = await Issue.find({ project: projectId })
       .populate('assignee', 'name avatar')

@@ -21,9 +21,27 @@ const webhookDeliverySchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    status: {
+      type: String,
+      enum: ['PROCESSING', 'COMPLETED', 'FAILED'],
+      default: 'PROCESSING',
+      index: true,
+    },
+    attempts: {
+      type: Number,
+      default: 1,
+    },
+    claimToken: {
+      type: String,
+      default: '',
+      select: false,
+    },
+    lastError: {
+      type: String,
+      default: '',
+    },
     processedAt: {
       type: Date,
-      default: Date.now,
       index: { expires: '30d' }, // Automatically expire old delivery logs after 30 days
     },
   },

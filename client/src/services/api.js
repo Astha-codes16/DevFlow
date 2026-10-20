@@ -25,6 +25,7 @@ api.interceptors.response.use(
   (error) => {
     if (
       error.response?.status === 401 &&
+      error.config?.url !== '/auth/me' &&
       !window.location.pathname.includes('/login')
     ) {
       localStorage.removeItem('devflow_token');

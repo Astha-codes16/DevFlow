@@ -1,8 +1,13 @@
 import { Project } from '../models/Project.js';
+import { Issue } from '../models/Issue.js';
+import { Comment } from '../models/Comment.js';
 import { User } from '../models/User.js';
 import { Activity } from '../models/Activity.js';
+import { Notification } from '../models/Notification.js';
+import { PullRequest } from '../models/PullRequest.js';
 import { repositoryService, normalizeRepoInput } from '../services/github/repositoryService.js';
 import { pullRequestService } from '../services/github/pullRequestService.js';
+import { requireProjectAccess } from '../middleware/projectAccess.js';
 
 export const createProject = async (req, res, next) => {
   try {
@@ -69,6 +74,7 @@ export const getProjects = async (req, res, next) => {
 
 export const getProjectById = async (req, res, next) => {
   try {
+    await requireProjectAccess(req.params.id, req.user);
     const project = await Project.findById(req.params.id)
       .populate('owner', 'name email avatar')
       .populate('members.user', 'name email avatar role');
@@ -91,18 +97,10 @@ export const getProjectById = async (req, res, next) => {
 
 export const updateProject = async (req, res, next) => {
   try {
+    await requireProjectAccess(req.params.id, req.user, { requireAdmin: true });
     const project = await Project.findById(req.params.id);
     if (!project) {
       return res.status(404).json({ success: false, message: 'Project not found' });
-    }
-
-    // Check admin permissions
-    const isOwner = project.owner.toString() === req.user._id.toString();
-    const member = project.members.find((m) => m.user.toString() === req.user._id.toString());
-    const isAdmin = isOwner || member?.role === 'ADMIN';
-
-    if (!isAdmin && req.user.role !== 'ADMIN') {
-      return res.status(403).json({ success: false, message: 'Admin permissions required to modify project' });
     }
 
     const { name, description, settings } = req.body;
@@ -124,16 +122,21 @@ export const updateProject = async (req, res, next) => {
 
 export const deleteProject = async (req, res, next) => {
   try {
+    await requireProjectAccess(req.params.id, req.user, { requireAdmin: true });
     const project = await Project.findById(req.params.id);
     if (!project) {
       return res.status(404).json({ success: false, message: 'Project not found' });
     }
 
-    if (project.owner.toString() !== req.user._id.toString() && req.user.role !== 'ADMIN') {
-      return res.status(403).json({ success: false, message: 'Only project owner or system admin can delete this project' });
-    }
-
-    await Project.findByIdAndDelete(req.params.id);
+    const issueIds = await Issue.find({ project: project._id }).distinct('_id');
+    await Promise.all([
+      Project.deleteOne({ _id: project._id }),
+      Issue.deleteMany({ project: project._id }),
+      PullRequest.deleteMany({ project: project._id }),
+      Activity.deleteMany({ project: project._id }),
+      Notification.deleteMany({ project: project._id }),
+      Comment.deleteMany({ issue: { $in: issueIds } }),
+    ]);
 
     res.status(200).json({
       success: true,
@@ -147,7 +150,7 @@ export const deleteProject = async (req, res, next) => {
 export const addMember = async (req, res, next) => {
   try {
     const { userId, role } = req.body;
-    const project = await Project.findById(req.params.id);
+    const { project } = await requireProjectAccess(req.params.id, req.user, { requireAdmin: true });
 
     if (!project) {
       return res.status(404).json({ success: false, message: 'Project not found' });
@@ -181,7 +184,7 @@ export const addMember = async (req, res, next) => {
 export const removeMember = async (req, res, next) => {
   try {
     const { userId } = req.params;
-    const project = await Project.findById(req.params.id);
+    const { project } = await requireProjectAccess(req.params.id, req.user, { requireAdmin: true });
 
     if (!project) {
       return res.status(404).json({ success: false, message: 'Project not found' });
@@ -207,19 +210,10 @@ export const removeMember = async (req, res, next) => {
 export const connectGithubRepo = async (req, res, next) => {
   try {
     const { owner, repo } = req.body;
-    const project = await Project.findById(req.params.id);
+    const { project } = await requireProjectAccess(req.params.id, req.user, { requireAdmin: true });
 
     if (!project) {
       return res.status(404).json({ success: false, message: 'Project not found' });
-    }
-
-    const isOwner = project.owner.toString() === req.user._id.toString();
-    const member = project.members.find((m) => m.user.toString() === req.user._id.toString());
-    if (!isOwner && member?.role !== 'ADMIN' && req.user.role !== 'ADMIN') {
-      return res.status(403).json({
-        success: false,
-        message: 'Permission denied: Project administrator role is required.',
-      });
     }
 
     const { owner: safeOwner, repo: safeRepo } = normalizeRepoInput(owner, repo);

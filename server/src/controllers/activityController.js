@@ -1,9 +1,11 @@
 import { Activity } from '../models/Activity.js';
+import { requireProjectAccess } from '../middleware/projectAccess.js';
 
 export const getProjectActivity = async (req, res, next) => {
   try {
     const { projectId } = req.params;
     const { limit = 40 } = req.query;
+    await requireProjectAccess(projectId, req.user);
 
     const activities = await Activity.find({ project: projectId })
       .populate('actor', 'name email avatar')

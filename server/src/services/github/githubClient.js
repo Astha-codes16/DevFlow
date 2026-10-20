@@ -29,10 +29,13 @@ class GitHubClient {
 
   async request(endpoint, options = {}, token = null) {
     const url = endpoint.startsWith('http') ? endpoint : `${this.baseUrl}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
+    const activeToken = this.getAuthToken(token);
+    const isGet = !options.method || options.method === 'GET';
+    const isPublicRequest = !activeToken;
     const cacheKey = `${options.method || 'GET'}:${url}`;
 
-    // Cache check for GET requests
-    if (!options.method || options.method === 'GET') {
+    // Only anonymous public responses are cached. Authenticated responses can contain private data.
+    if (isGet && isPublicRequest) {
       const cached = this.cache.get(cacheKey);
       if (cached && Date.now() - cached.timestamp < this.cacheTTL) {
         return cached.data;
@@ -74,7 +77,7 @@ class GitHubClient {
     const data = await response.json();
 
     // Cache successful GET responses
-    if (!options.method || options.method === 'GET') {
+    if (isGet && isPublicRequest) {
       this.cache.set(cacheKey, {
         timestamp: Date.now(),
         data,

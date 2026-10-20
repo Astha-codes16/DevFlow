@@ -7,13 +7,18 @@ export const connectDB = async () => {
 
   try {
     // Attempt standard connection with 2.5s server selection timeout
-    console.log(`Connecting to MongoDB at: ${uri}`);
+    console.log('Connecting to MongoDB');
     await mongoose.connect(uri, {
       serverSelectionTimeoutMS: 2500,
     });
     console.log('MongoDB connected successfully via URI');
   } catch (primaryErr) {
-    console.warn(`Could not connect to MongoDB URI (${primaryErr.message}). Launching embedded In-Memory MongoDB...`);
+    const allowMemoryFallback = process.env.NODE_ENV === 'test' || process.env.USE_IN_MEMORY_DB === 'true';
+    if (!allowMemoryFallback) {
+      throw new Error('MongoDB connection failed and in-memory fallback is disabled');
+    }
+
+    console.warn('MongoDB connection failed. Starting explicitly enabled in-memory MongoDB.');
     
     try {
       const { MongoMemoryServer } = await import('mongodb-memory-server');
@@ -23,13 +28,8 @@ export const connectDB = async () => {
       
       await mongoose.connect(memUri);
       console.log('Connected to embedded In-Memory MongoDB successfully.');
-      
-      // Auto-seed demo data if running in memory
-      const { seedDatabase } = await import('../utils/seedData.js');
-      await seedDatabase();
     } catch (memErr) {
-      console.error('Failed to initialize embedded MongoDB:', memErr.message);
-      throw memErr;
+      throw new Error('Failed to initialize explicitly enabled in-memory MongoDB');
     }
   }
 };

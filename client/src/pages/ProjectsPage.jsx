@@ -13,7 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import { useProject } from '../context/ProjectContext';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/authState';
 import api from '../services/api';
 
 export default function ProjectsPage() {

@@ -1,11 +1,11 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
-import { useAuth } from './AuthContext';
+import { useAuth } from './authState';
 
 const ProjectContext = createContext(null);
 
 export const ProjectProvider = ({ children }) => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, loading: authLoading } = useAuth();
   const [projects, setProjects] = useState([]);
   const [activeProject, setActiveProject] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -33,13 +33,13 @@ export const ProjectProvider = ({ children }) => {
   }, [isAuthenticated]);
 
   useEffect(() => {
-    if (isAuthenticated) {
+    if (!authLoading && isAuthenticated) {
       fetchProjects();
-    } else {
+    } else if (!authLoading) {
       setProjects([]);
       setActiveProject(null);
     }
-  }, [isAuthenticated, fetchProjects]);
+  }, [authLoading, isAuthenticated, fetchProjects]);
 
   const selectProject = (projectOrId) => {
     const project = typeof projectOrId === 'string'

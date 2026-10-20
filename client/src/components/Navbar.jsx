@@ -12,7 +12,7 @@ import {
   ExternalLink,
   Zap,
 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/authState';
 import { useProject } from '../context/ProjectContext';
 import api from '../services/api';
 

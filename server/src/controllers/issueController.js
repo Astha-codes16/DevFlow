@@ -3,10 +3,13 @@ import { Project } from '../models/Project.js';
 import { Comment } from '../models/Comment.js';
 import { Activity } from '../models/Activity.js';
 import { Notification } from '../models/Notification.js';
+import { assertProjectMember, requireProjectAccess } from '../middleware/projectAccess.js';
 
 export const createIssue = async (req, res, next) => {
   try {
     const { title, description, type, priority, labels, assignee, project: projectId } = req.body;
+    const { project: projectRecord } = await requireProjectAccess(projectId, req.user);
+    assertProjectMember(projectRecord, assignee);
 
     // Atomically increment project issueCounter
     const project = await Project.findByIdAndUpdate(
@@ -87,6 +90,11 @@ export const getIssues = async (req, res, next) => {
       order = 'desc',
     } = req.query;
 
+    if (!projectId) {
+      return res.status(400).json({ success: false, message: 'Project ID is required' });
+    }
+    await requireProjectAccess(projectId, req.user);
+
     const filter = {};
 
     if (projectId) filter.project = projectId;
@@ -145,6 +153,7 @@ export const getIssueById = async (req, res, next) => {
     if (!issue) {
       return res.status(404).json({ success: false, message: 'Issue not found' });
     }
+    await requireProjectAccess(issue.project, req.user);
 
     const comments = await Comment.find({ issue: issue._id })
       .populate('author', 'name email avatar')
@@ -172,6 +181,7 @@ export const updateIssue = async (req, res, next) => {
     if (!issue) {
       return res.status(404).json({ success: false, message: 'Issue not found' });
     }
+    const { project: projectRecord } = await requireProjectAccess(issue.project, req.user);
 
     const { title, description, type, status, priority, labels, assignee } = req.body;
     const activitiesToCreate = [];
@@ -221,6 +231,7 @@ export const updateIssue = async (req, res, next) => {
 
     // Track assignee change
     if (assignee !== undefined && String(assignee) !== String(issue.assignee)) {
+      assertProjectMember(projectRecord, assignee);
       activitiesToCreate.push({
         project: issue.project,
         issue: issue._id,
@@ -278,6 +289,7 @@ export const deleteIssue = async (req, res, next) => {
     if (!issue) {
       return res.status(404).json({ success: false, message: 'Issue not found' });
     }
+    await requireProjectAccess(issue.project, req.user, { requireAdmin: true });
 
     await Promise.all([
       Issue.findByIdAndDelete(req.params.id),
@@ -302,6 +314,7 @@ export const addComment = async (req, res, next) => {
     if (!issue) {
       return res.status(404).json({ success: false, message: 'Issue not found' });
     }
+    await requireProjectAccess(issue.project, req.user);
 
     const comment = await Comment.create({
       issue: issue._id,

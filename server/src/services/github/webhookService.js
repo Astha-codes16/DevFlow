@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { randomUUID } from 'crypto';
 import { Project } from '../../models/Project.js';
 import { PullRequest } from '../../models/PullRequest.js';
 import { Issue } from '../../models/Issue.js';
@@ -14,16 +15,74 @@ export class WebhookService {
    * Verifies GitHub HMAC-SHA256 signature
    */
   verifySignature(rawBody, signature, secret = process.env.GITHUB_WEBHOOK_SECRET) {
-    if (!secret) return true; // Bypass only if no secret is configured
+    if (!secret) return false;
     if (!signature) return false;
 
     try {
       const hmac = crypto.createHmac('sha256', secret);
       const digest = `sha256=${hmac.update(rawBody).digest('hex')}`;
-      return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
+      const signatureBuffer = Buffer.from(signature, 'utf8');
+      const digestBuffer = Buffer.from(digest, 'utf8');
+      return signatureBuffer.length === digestBuffer.length &&
+        crypto.timingSafeEqual(signatureBuffer, digestBuffer);
     } catch {
       return false;
     }
+  }
+
+  async claimDelivery({ deliveryId, event, action, repository }) {
+    if (!deliveryId) return null;
+
+    const claimToken = randomUUID();
+    const delivery = await WebhookDelivery.findOneAndUpdate(
+      { deliveryId },
+      {
+        $setOnInsert: {
+          deliveryId,
+          event,
+          action,
+          repository,
+          status: 'PROCESSING',
+          attempts: 1,
+          claimToken,
+        },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    ).select('+claimToken');
+
+    if (delivery.claimToken === claimToken) return { claimToken };
+    if (delivery.status === 'COMPLETED' || (!delivery.status && delivery.processedAt)) {
+      return { duplicate: true, message: `Webhook delivery ${deliveryId} was already processed.` };
+    }
+    if (delivery.status === 'PROCESSING') {
+      return { duplicate: true, message: `Webhook delivery ${deliveryId} is already being processed.` };
+    }
+
+    const retry = await WebhookDelivery.findOneAndUpdate(
+      { deliveryId, status: 'FAILED' },
+      {
+        $set: { status: 'PROCESSING', claimToken, lastError: '' },
+        $inc: { attempts: 1 },
+      },
+      { new: true }
+    ).select('+claimToken');
+
+    if (retry?.claimToken === claimToken) return { claimToken };
+    return { duplicate: true, message: `Webhook delivery ${deliveryId} is already being processed.` };
+  }
+
+  async completeDelivery(deliveryId, claimToken) {
+    await WebhookDelivery.updateOne(
+      { deliveryId, status: 'PROCESSING', claimToken },
+      { $set: { status: 'COMPLETED', processedAt: new Date(), claimToken: '' } }
+    );
+  }
+
+  async failDelivery(deliveryId, claimToken) {
+    await WebhookDelivery.updateOne(
+      { deliveryId, status: 'PROCESSING', claimToken },
+      { $set: { status: 'FAILED', lastError: 'processing_failed', claimToken: '' }, $unset: { processedAt: 1 } }
+    );
   }
 
   /**
@@ -38,27 +97,19 @@ export class WebhookService {
       return { success: false, message: 'Invalid payload: missing repository details' };
     }
 
-    // 1. Idempotency Check (Section 12)
-    if (deliveryId) {
-      const existing = await WebhookDelivery.findOne({ deliveryId });
-      if (existing) {
-        return {
-          success: true,
-          duplicate: true,
-          message: `Webhook delivery ${deliveryId} was already processed (idempotency hit).`,
-        };
-      }
-
-      await WebhookDelivery.create({
-        deliveryId,
-        event,
-        action: payload.action || '',
-        repository: repoFullName || `${repoOwner}/${repoName}`,
-      });
+    const deliveryClaim = await this.claimDelivery({
+      deliveryId,
+      event,
+      action: payload.action || '',
+      repository: repoFullName || `${repoOwner}/${repoName}`,
+    });
+    if (deliveryClaim?.duplicate) {
+      return { success: true, duplicate: true, message: deliveryClaim.message };
     }
 
-    // 2. Find matching DevFlow Project
-    const project = await Project.findOne({
+    try {
+      // 2. Find matching DevFlow Project
+      const project = await Project.findOne({
       $or: [
         {
           'github.owner': new RegExp(`^${repoOwner}$`, 'i'),
@@ -69,23 +120,33 @@ export class WebhookService {
           'githubRepository.repo': new RegExp(`^${repoName}$`, 'i'),
         },
       ],
-    });
+      });
 
-    if (!project) {
-      return {
-        success: true,
-        message: `Webhook received for ${repoOwner}/${repoName}, but no matching connected DevFlow project found.`,
-      };
+      if (!project) {
+        const result = {
+          success: true,
+          message: `Webhook received for ${repoOwner}/${repoName}, but no matching connected DevFlow project found.`,
+        };
+        if (deliveryClaim) await this.completeDelivery(deliveryId, deliveryClaim.claimToken);
+        return result;
+      }
+
+      // 3. Dispatch by event type
+      let result;
+      if (event === 'pull_request') {
+        result = await this.handlePullRequestEvent(payload, project);
+      } else if (event === 'push') {
+        result = await this.handlePushEvent(payload, project);
+      } else {
+        result = { success: true, message: `Event ${event} recorded.` };
+      }
+
+      if (deliveryClaim) await this.completeDelivery(deliveryId, deliveryClaim.claimToken);
+      return result;
+    } catch (error) {
+      if (deliveryClaim) await this.failDelivery(deliveryId, deliveryClaim.claimToken);
+      throw error;
     }
-
-    // 3. Dispatch by event type
-    if (event === 'pull_request') {
-      return await this.handlePullRequestEvent(payload, project);
-    } else if (event === 'push') {
-      return await this.handlePushEvent(payload, project);
-    }
-
-    return { success: true, message: `Event ${event} recorded.` };
   }
 
   async handlePullRequestEvent(payload, project) {

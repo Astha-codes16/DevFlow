@@ -1,7 +1,6 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import api from '../services/api';
-
-const AuthContext = createContext(null);
+import { AuthContext } from './authState';
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(() => {
@@ -19,7 +18,7 @@ export const AuthProvider = ({ children }) => {
           setUser(res.data.user);
           localStorage.setItem('devflow_user', JSON.stringify(res.data.user));
         } catch (err) {
-          console.warn('Failed to verify token:', err);
+          console.warn('Failed to verify token; clearing the local session.');
           logout();
         }
       }
@@ -73,4 +72,3 @@ export const AuthProvider = ({ children }) => {
   );
 };
 
-export const useAuth = () => useContext(AuthContext);

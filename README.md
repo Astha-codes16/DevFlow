@@ -160,7 +160,7 @@ DevFlow/
 │   │   │   └── github/         # GitHub integration (githubClient, issueLinker, webhookHandler)
 │   │   ├── controllers/        # Express route controllers
 │   │   ├── routes/             # Modular Express routers
-│   │   ├── utils/              # Seed data script
+│   │   ├── /              # Seed data script
 │   │   └── tests/              # Automated backend test suite (api.test.js)
 │   ├── package.json
 │   ├── server.js               # Entry point
@@ -359,7 +359,7 @@ cd server
 npm start
 # Server starts on http://localhost:5000
 ```
-*Note: If local MongoDB is not running, DevFlow automatically launches an embedded In-Memory MongoDB and seeds it with demo data!*
+If local MongoDB is not running, DevFlow automatically launches an embedded In-Memory MongoDB for the current process. It does not seed demo data during startup.
 
 **Terminal 2 (Frontend):**
 ```bash
@@ -388,14 +388,16 @@ The test suite verifies:
 
 ---
 
-## 👥 Demo Accounts (1-Click Login)
+## Development Seed Data
 
-The login screen (`/login`) includes 1-click demo login buttons for instant demonstration:
-- **Astha Sharma** (`astha@devflow.ai` / `password123`) — **Role: ADMIN**
-- **Rahul Verma** (`rahul@devflow.ai` / `password123`) — **Role: DEVELOPER**
-- **Ananya Iyer** (`ananya@devflow.ai` / `password123`) — **Role: DEVELOPER**
-
----
+Demo data is never created during server startup. To explicitly seed a development or test database, set both variables and run:
+```bash
+export NODE_ENV=development
+export ENABLE_DEMO_SEED=true
+cd server
+npm run seed
+```
+Never enable this against a production database.
 
 ## 🎯 SDE Interview Walkthrough Guide
 

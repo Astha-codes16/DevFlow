@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Workflow, ArrowRight, Loader2 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/authState';
 
 export default function RegisterPage() {
   const [name, setName] = useState('');
@@ -20,15 +20,20 @@ export default function RegisterPage() {
     setError('');
     try {
       await register({
-        name,
-        email,
+        name: name.trim(),
+        email: email.trim(),
         password,
         role,
-        githubUsername,
+        githubUsername: githubUsername.trim(),
       });
       navigate('/dashboard');
     } catch (err) {
-      setError(err.response?.data?.message || 'Registration failed');
+      const validationErrors = err.response?.data?.errors;
+      setError(
+        validationErrors?.length
+          ? validationErrors.map((item) => `${item.field}: ${item.message}`).join('; ')
+          : err.response?.data?.message || 'Registration failed'
+      );
     } finally {
       setLoading(false);
     }

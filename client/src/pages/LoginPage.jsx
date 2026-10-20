@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Workflow, ArrowRight, Loader2, Shield, Code, UserCheck } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { Workflow, ArrowRight, Loader2 } from 'lucide-react';
+import { useAuth } from '../context/authState';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -16,25 +16,15 @@ export default function LoginPage() {
     setLoading(true);
     setError('');
     try {
-      await login(email, password);
+      await login(email.trim(), password);
       navigate('/dashboard');
     } catch (err) {
-      setError(err.response?.data?.message || 'Invalid email or password');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleQuickLogin = async (demoEmail) => {
-    setEmail(demoEmail);
-    setPassword('password123');
-    setLoading(true);
-    setError('');
-    try {
-      await login(demoEmail, 'password123');
-      navigate('/dashboard');
-    } catch (err) {
-      setError(err.response?.data?.message || 'Login failed');
+      const validationErrors = err.response?.data?.errors;
+      setError(
+        validationErrors?.length
+          ? validationErrors.map((item) => `${item.field}: ${item.message}`).join('; ')
+          : err.response?.data?.message || 'Invalid email or password'
+      );
     } finally {
       setLoading(false);
     }
@@ -109,49 +99,6 @@ export default function LoginPage() {
             </button>
           </form>
 
-          {/* Quick Demo Login Presets */}
-          <div className="mt-6 pt-5 border-t border-dark-border/70">
-            <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-2.5 text-center">
-              Demo Accounts
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={() => handleQuickLogin('astha@devflow.ai')}
-                className="p-2 rounded-lg bg-dark-card hover:bg-dark-hover border border-dark-border text-left transition-colors group"
-              >
-                <div className="flex items-center space-x-1.5 text-purple-400 font-semibold text-[11px] mb-0.5">
-                  <Shield className="w-3 h-3" />
-                  <span>Astha</span>
-                </div>
-                <div className="text-[10px] text-slate-400">Admin</div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleQuickLogin('rahul@devflow.ai')}
-                className="p-2 rounded-lg bg-dark-card hover:bg-dark-hover border border-dark-border text-left transition-colors group"
-              >
-                <div className="flex items-center space-x-1.5 text-devflow-400 font-semibold text-[11px] mb-0.5">
-                  <Code className="w-3 h-3" />
-                  <span>Rahul</span>
-                </div>
-                <div className="text-[10px] text-slate-400">Developer</div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleQuickLogin('ananya@devflow.ai')}
-                className="p-2 rounded-lg bg-dark-card hover:bg-dark-hover border border-dark-border text-left transition-colors group"
-              >
-                <div className="flex items-center space-x-1.5 text-emerald-400 font-semibold text-[11px] mb-0.5">
-                  <UserCheck className="w-3 h-3" />
-                  <span>Ananya</span>
-                </div>
-                <div className="text-[10px] text-slate-400">Developer</div>
-              </button>
-            </div>
-          </div>
         </div>
 
         <div className="text-center text-xs text-slate-400 mt-6">

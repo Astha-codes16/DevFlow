@@ -9,6 +9,7 @@
     "client": "npm --prefix client run dev",
     "test": "npm --prefix server test",
     "seed": "npm --prefix server run seed",
+    "cleanup:demo": "npm --prefix server run cleanup:demo",
     "build": "npm --prefix client run build"
   },
   "dependencies": {

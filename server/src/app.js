@@ -29,10 +29,16 @@ app.use(
 
 // Logging
 if (process.env.NODE_ENV !== 'test') {
-  app.use(morgan('dev'));
+  app.use(morgan((tokens, req, res) => [
+    tokens.method(req, res),
+    req.path,
+    tokens.status(req, res),
+    `${tokens['response-time'](req, res)} ms`,
+  ].join(' ')));
 }
 
 // Request size limits
+app.use(['/api/github/webhook', '/api/webhook'], express.raw({ type: 'application/json', limit: '10mb' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 

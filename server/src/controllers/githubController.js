@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { randomUUID } from 'crypto';
 import { Project } from '../models/Project.js';
 import { Issue } from '../models/Issue.js';
 import { User } from '../models/User.js';
@@ -9,35 +10,7 @@ import { repositoryService } from '../services/github/repositoryService.js';
 import { pullRequestService } from '../services/github/pullRequestService.js';
 import { webhookService } from '../services/github/webhookService.js';
 import { manualLinkPR, unlinkPRFromIssue } from '../services/github/issueLinker.js';
-
-/**
- * Helper to check project membership and admin status
- */
-async function verifyProjectAccess(projectId, userId, requireAdmin = false) {
-  const project = await Project.findById(projectId);
-  if (!project) {
-    const error = new Error('Project not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const isOwner = project.owner.toString() === userId.toString();
-  const member = project.members.find((m) => m.user.toString() === userId.toString());
-
-  if (!isOwner && !member) {
-    const error = new Error('Access denied: You are not a member of this project.');
-    error.statusCode = 403;
-    throw error;
-  }
-
-  if (requireAdmin && !isOwner && member?.role !== 'ADMIN') {
-    const error = new Error('Permission denied: Project administrator role is required.');
-    error.statusCode = 403;
-    throw error;
-  }
-
-  return project;
-}
+import { requireProjectAccess as verifyProjectAccess } from '../middleware/projectAccess.js';
 
 /**
  * Helper to get user's GitHub access token if stored
@@ -55,7 +28,7 @@ async function getUserGitHubToken(userId) {
 export const getConnectedRepository = async (req, res, next) => {
   try {
     const { projectId } = req.params;
-    const project = await verifyProjectAccess(projectId, req.user._id);
+    const { project } = await verifyProjectAccess(projectId, req.user);
 
     const isConnected = Boolean(project.github?.connected || project.githubRepository?.connected);
     const owner = project.github?.owner || project.githubRepository?.owner;
@@ -126,7 +99,7 @@ export const connectRepository = async (req, res, next) => {
       });
     }
 
-    const project = await verifyProjectAccess(projectId, req.user._id, true);
+    const { project } = await verifyProjectAccess(projectId, req.user, { requireAdmin: true });
     const token = await getUserGitHubToken(req.user._id);
 
     const details = await repositoryService.connectRepository(
@@ -158,7 +131,7 @@ export const connectRepository = async (req, res, next) => {
 export const disconnectRepository = async (req, res, next) => {
   try {
     const { projectId } = req.params;
-    const project = await verifyProjectAccess(projectId, req.user._id, true);
+    const { project } = await verifyProjectAccess(projectId, req.user, { requireAdmin: true });
 
     await repositoryService.disconnectRepository(project, req.user._id);
 
@@ -178,7 +151,7 @@ export const disconnectRepository = async (req, res, next) => {
 export const getRepositoryBranches = async (req, res, next) => {
   try {
     const { projectId } = req.params;
-    const project = await verifyProjectAccess(projectId, req.user._id);
+    const { project } = await verifyProjectAccess(projectId, req.user);
 
     const owner = project.github?.owner || project.githubRepository?.owner;
     const repo = project.github?.repository || project.githubRepository?.repo;
@@ -211,7 +184,7 @@ export const getRepositoryCommits = async (req, res, next) => {
   try {
     const { projectId } = req.params;
     const { branch, limit } = req.query;
-    const project = await verifyProjectAccess(projectId, req.user._id);
+    const { project } = await verifyProjectAccess(projectId, req.user);
 
     const owner = project.github?.owner || project.githubRepository?.owner;
     const repo = project.github?.repository || project.githubRepository?.repo;
@@ -248,7 +221,7 @@ export const getProjectPullRequests = async (req, res, next) => {
   try {
     const { projectId } = req.params;
     const { state = 'all', sync = 'false' } = req.query;
-    const project = await verifyProjectAccess(projectId, req.user._id);
+    const { project } = await verifyProjectAccess(projectId, req.user);
 
     const owner = project.github?.owner || project.githubRepository?.owner;
     const repo = project.github?.repository || project.githubRepository?.repo;
@@ -295,7 +268,7 @@ export const getProjectPullRequests = async (req, res, next) => {
 export const getPullRequestFiles = async (req, res, next) => {
   try {
     const { projectId, prNumber } = req.params;
-    const project = await verifyProjectAccess(projectId, req.user._id);
+    const { project } = await verifyProjectAccess(projectId, req.user);
 
     const owner = project.github?.owner || project.githubRepository?.owner;
     const repo = project.github?.repository || project.githubRepository?.repo;
@@ -329,7 +302,7 @@ export const getPullRequestFiles = async (req, res, next) => {
 export const getPullRequestCommits = async (req, res, next) => {
   try {
     const { projectId, prNumber } = req.params;
-    const project = await verifyProjectAccess(projectId, req.user._id);
+    const { project } = await verifyProjectAccess(projectId, req.user);
 
     const owner = project.github?.owner || project.githubRepository?.owner;
     const repo = project.github?.repository || project.githubRepository?.repo;
@@ -389,7 +362,7 @@ export const linkPullRequestToIssue = async (req, res, next) => {
     }
 
     // 2. Verify user has access to the project
-    const project = await verifyProjectAccess(issue.project, req.user._id);
+    const { project } = await verifyProjectAccess(issue.project, req.user);
 
     // 3. Verify that the project has a connected GitHub repository
     const owner = project.github?.owner || project.githubRepository?.owner;
@@ -549,7 +522,7 @@ export const unlinkPullRequestFromIssue = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Issue not found.' });
     }
 
-    await verifyProjectAccess(issue.project, req.user._id);
+    await verifyProjectAccess(issue.project, req.user);
 
     const num = parseInt(prNumber, 10);
     const pullRequest = await PullRequest.findOne({
@@ -596,6 +569,60 @@ export const unlinkPullRequestFromIssue = async (req, res, next) => {
 };
 
 /**
+ * POST /api/github/simulate-webhook
+ * Sends a local, authenticated PR event through the same service as GitHub.
+ */
+export const simulateGitHubWebhook = async (req, res, next) => {
+  try {
+    const { projectId, prNumber, action = 'closed', merged = false, title, body = '' } = req.body;
+    const numericPrNumber = Number(prNumber);
+    if (!Number.isInteger(numericPrNumber) || numericPrNumber < 1) {
+      return res.status(400).json({ success: false, message: 'A valid pull request number is required.' });
+    }
+    if (!['opened', 'closed', 'synchronize', 'reopened'].includes(action)) {
+      return res.status(400).json({ success: false, message: 'Unsupported pull request action.' });
+    }
+    const { project } = await verifyProjectAccess(projectId, req.user);
+    const owner = project.github?.owner || project.githubRepository?.owner;
+    const repo = project.github?.repository || project.githubRepository?.repo;
+
+    if (!owner || !repo || (!project.github?.connected && !project.githubRepository?.connected)) {
+      return res.status(400).json({
+        success: false,
+        message: 'No GitHub repository connected to this project.',
+      });
+    }
+
+    const result = await webhookService.handleWebhook({
+      event: 'pull_request',
+      deliveryId: `simulation-${randomUUID()}`,
+      payload: {
+        action,
+        repository: {
+          full_name: `${owner}/${repo}`,
+          name: repo,
+          owner: { login: owner },
+        },
+        pull_request: {
+          number: numericPrNumber,
+          title: title || `Simulated PR #${prNumber}`,
+          body,
+          merged: Boolean(merged),
+          html_url: `https://github.com/${owner}/${repo}/pull/${prNumber}`,
+          user: { login: req.user.name || 'devflow-simulator', avatar_url: '' },
+          head: { ref: 'devflow-simulation' },
+          base: { ref: project.github?.defaultBranch || 'main' },
+        },
+      },
+    });
+
+    res.status(200).json({ success: true, result });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
  * POST /api/github/webhook
  * Inbound real GitHub Webhook receiver with HMAC-SHA256 signature verification & idempotency
  */
@@ -604,9 +631,11 @@ export const handleGitHubWebhook = async (req, res, next) => {
     const signature = req.headers['x-hub-signature-256'];
     const event = req.headers['x-github-event'] || 'ping';
     const deliveryId = req.headers['x-github-delivery'];
+    const rawBody = Buffer.isBuffer(req.body)
+      ? req.body
+      : Buffer.from(JSON.stringify(req.body || {}));
 
     // 1. Signature Verification (Section 11)
-    const rawBody = JSON.stringify(req.body);
     const isValid = webhookService.verifySignature(rawBody, signature);
 
     if (!isValid) {
@@ -617,12 +646,19 @@ export const handleGitHubWebhook = async (req, res, next) => {
       });
     }
 
+    let payload;
+    try {
+      payload = JSON.parse(rawBody.toString('utf8'));
+    } catch {
+      return res.status(400).json({ success: false, message: 'Invalid webhook JSON payload.' });
+    }
+
     // 2. Respond immediately to ping
     if (event === 'ping') {
       return res.status(200).json({
         success: true,
         message: 'Pong! DevFlow GitHub Webhook receiver is healthy.',
-        zen: req.body?.zen,
+        zen: payload?.zen,
       });
     }
 
@@ -630,7 +666,7 @@ export const handleGitHubWebhook = async (req, res, next) => {
     const result = await webhookService.handleWebhook({
       event,
       deliveryId,
-      payload: req.body,
+      payload,
     });
 
     res.status(200).json(result);

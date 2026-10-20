@@ -11,14 +11,17 @@ import { analyzePullRequest } from '../ai/prAnalyzer.js';
  * Verify GitHub webhook HMAC-SHA256 signature
  */
 export function verifyGitHubSignature(payload, signature, secret) {
-  if (!secret) return true; // If no secret configured in development, bypass check
+  if (!secret) return false;
   if (!signature) return false;
 
   const hmac = crypto.createHmac('sha256', secret);
   const digest = `sha256=${hmac.update(payload).digest('hex')}`;
   
   try {
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
+    const signatureBuffer = Buffer.from(signature, 'utf8');
+    const digestBuffer = Buffer.from(digest, 'utf8');
+    return signatureBuffer.length === digestBuffer.length &&
+      crypto.timingSafeEqual(signatureBuffer, digestBuffer);
   } catch {
     return false;
   }

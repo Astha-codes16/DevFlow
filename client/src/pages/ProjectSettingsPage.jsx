@@ -11,7 +11,7 @@ import {
   GitBranch,
 } from 'lucide-react';
 import GithubIcon from '../components/GithubIcon';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/authState';
 import { useProject } from '../context/ProjectContext';
 import api from '../services/api';
 

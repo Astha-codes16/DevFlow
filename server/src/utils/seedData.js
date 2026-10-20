@@ -1,3 +1,6 @@
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import { User } from '../models/User.js';
 import { Project } from '../models/Project.js';
@@ -9,17 +12,30 @@ import { Notification } from '../models/Notification.js';
 
 export const seedDatabase = async () => {
   try {
-    console.log('[Seed] Checking existing database records...');
-    const existingUsers = await User.countDocuments();
-    if (existingUsers > 0) {
-      console.log('[Seed] Database already contains records. Skipping seed.');
+    const isDevelopmentOrTest = ['development', 'test'].includes(process.env.NODE_ENV);
+    const isExplicitlyEnabled = process.env.ENABLE_DEMO_SEED === 'true';
+
+    if (!isDevelopmentOrTest || !isExplicitlyEnabled) {
+      console.log('[Seed] Demo seeding requires NODE_ENV=development (or test) and ENABLE_DEMO_SEED=true. Skipping.');
       return;
     }
 
-    console.log('[Seed] Seeding realistic demonstration data...');
+    console.log('[Seed] Inspecting and verifying demonstration dataset...');
 
-    // 1. Create Users
+    const demoUserEmail = (process.env.DEMO_USER_EMAIL || 'demo@devflow.ai').toLowerCase().trim();
+    const demoUserPassword = process.env.DEMO_USER_PASSWORD || 'password123';
+
+    // 1. Independent User Verification & Creation
+    // Preserve existing users; create missing demo team accounts using existing User model and bcrypt hashing
     const usersData = [
+      {
+        name: 'Demo Lead',
+        email: demoUserEmail,
+        password: demoUserPassword,
+        role: 'ADMIN',
+        avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+        githubUsername: 'devflow-demo',
+      },
       {
         name: 'Astha Sharma',
         email: 'astha@devflow.ai',
@@ -62,123 +78,259 @@ export const seedDatabase = async () => {
       },
     ];
 
-    const users = [];
+    const userMap = new Map();
     for (const u of usersData) {
-      const created = await User.create(u);
-      users.push(created);
+      let user = await User.findOne({ email: u.email });
+      if (!user) {
+        // User.create invokes userSchema.pre('save') which hashes password via bcrypt
+        user = await User.create(u);
+        console.log(`[Seed] Created demo user account: ${u.email} (${u.role})`);
+      }
+      userMap.set(u.email, user);
     }
-    const [astha, rahul, ananya, vikram, dev] = users;
 
-    // 2. Create Project
-    const project = await Project.create({
-      name: 'DevFlow Core Platform',
-      key: 'FLOW',
-      description: 'AI-assisted developer workspace and issue resolution pipeline',
-      owner: astha._id,
-      issueCounter: 16,
-      members: [
+    const demoUser = userMap.get(demoUserEmail);
+    const astha = userMap.get('astha@devflow.ai');
+    const rahul = userMap.get('rahul@devflow.ai');
+    const ananya = userMap.get('ananya@devflow.ai');
+    const vikram = userMap.get('vikram@devflow.ai');
+    const dev = userMap.get('dev@devflow.ai');
+
+    // 2. Independent Projects Verification & Creation
+    // Project A: DevFlow Core Platform (Key: FLOW)
+    let flowProject = await Project.findOne({ key: 'FLOW' });
+    if (!flowProject) {
+      flowProject = await Project.create({
+        name: 'DevFlow Core Platform',
+        key: 'FLOW',
+        description: 'AI-assisted developer workspace and issue resolution pipeline',
+        owner: demoUser._id,
+        issueCounter: 131,
+        members: [
+          { user: demoUser._id, role: 'ADMIN' },
+          { user: astha._id, role: 'ADMIN' },
+          { user: rahul._id, role: 'DEVELOPER' },
+          { user: ananya._id, role: 'DEVELOPER' },
+          { user: vikram._id, role: 'DEVELOPER' },
+          { user: dev._id, role: 'VIEWER' },
+        ],
+        github: {
+          connected: true,
+          owner: 'devflow-ai',
+          repository: 'devflow-core',
+          url: 'https://github.com/devflow-ai/devflow-core',
+          defaultBranch: 'main',
+          stars: 124,
+          forks: 38,
+          openIssues: 9,
+          connectedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+          connectedBy: demoUser._id,
+        },
+        githubRepository: {
+          connected: true,
+          owner: 'devflow-ai',
+          repo: 'devflow-core',
+          url: 'https://github.com/devflow-ai/devflow-core',
+          defaultBranch: 'main',
+          connectedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+        },
+        settings: {
+          autoCloseOnMerge: true,
+        },
+      });
+      console.log('[Seed] Created FLOW project');
+    } else {
+      // Ensure demo user and demo team members are in FLOW project members list
+      let modified = false;
+      const requiredMembers = [
+        { user: demoUser._id, role: 'ADMIN' },
         { user: astha._id, role: 'ADMIN' },
         { user: rahul._id, role: 'DEVELOPER' },
         { user: ananya._id, role: 'DEVELOPER' },
         { user: vikram._id, role: 'DEVELOPER' },
         { user: dev._id, role: 'VIEWER' },
-      ],
-      githubRepository: {
-        connected: true,
-        owner: 'devflow-ai',
-        repo: 'devflow-core',
-        url: 'https://github.com/devflow-ai/devflow-core',
-        defaultBranch: 'main',
-        connectedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      },
-      settings: {
-        autoCloseOnMerge: true,
-      },
-    });
+      ];
 
-    // 3. Create Pull Requests
-    const pr48 = await PullRequest.create({
-      project: project._id,
-      prNumber: 48,
-      title: 'Fix JWT expiration handling in authMiddleware (Fixes #124)',
-      body: 'Catch TokenExpiredError explicitly and return HTTP 401 instead of bubbling unhandled exception to 500.\n\nCloses #124',
-      htmlUrl: 'https://github.com/devflow-ai/devflow-core/pull/48',
-      author: { login: rahul.githubUsername, avatarUrl: rahul.avatar },
-      status: 'OPEN',
-      headBranch: 'fix/jwt-expiration',
-      baseBranch: 'main',
-      changedFilesCount: 3,
-      additions: 38,
-      deletions: 9,
-      aiAnalysis: {
-        issueAlignment: 'HIGH',
-        confidence: 94,
-        summary: 'PR properly intercepts TokenExpiredError in authMiddleware and returns 401 Unauthorized with standard error response envelope.',
-        potentialConcerns: [
-          'Verify refresh token endpoint still accepts expired access tokens for token rotation',
-          'Ensure test suite covers tampered signature as well as expired timestamp',
+      for (const reqMember of requiredMembers) {
+        const isMember = flowProject.members.some(
+          (m) => m.user.toString() === reqMember.user.toString()
+        );
+        if (!isMember) {
+          flowProject.members.push(reqMember);
+          modified = true;
+        }
+      }
+
+      // Ensure GitHub repository metadata is configured for demo walkthroughs
+      if (!flowProject.github?.connected || !flowProject.githubRepository?.connected) {
+        flowProject.github = {
+          connected: true,
+          owner: 'devflow-ai',
+          repository: 'devflow-core',
+          url: 'https://github.com/devflow-ai/devflow-core',
+          defaultBranch: 'main',
+          stars: 124,
+          forks: 38,
+          openIssues: 9,
+          connectedAt: flowProject.github?.connectedAt || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+          connectedBy: demoUser._id,
+        };
+        flowProject.githubRepository = {
+          connected: true,
+          owner: 'devflow-ai',
+          repo: 'devflow-core',
+          url: 'https://github.com/devflow-ai/devflow-core',
+          defaultBranch: 'main',
+          connectedAt: flowProject.githubRepository?.connectedAt || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+        };
+        modified = true;
+      }
+
+      if (modified) {
+        await flowProject.save();
+        console.log('[Seed] Updated FLOW project membership and repository links');
+      }
+    }
+
+    // Project B: CloudSync Microservice (Key: SYNC) - Demonstrates multi-project workspace switching
+    let syncProject = await Project.findOne({ key: 'SYNC' });
+    if (!syncProject) {
+      syncProject = await Project.create({
+        name: 'CloudSync Microservice',
+        key: 'SYNC',
+        description: 'High-performance distributed file synchronization engine and edge storage worker',
+        owner: demoUser._id,
+        issueCounter: 4,
+        members: [
+          { user: demoUser._id, role: 'ADMIN' },
+          { user: rahul._id, role: 'DEVELOPER' },
+          { user: ananya._id, role: 'DEVELOPER' },
         ],
-        suggestedTests: [
-          'GET /api/me with expired JWT -> Expect 401 { success: false, message: "Token expired" }',
-          'GET /api/me with valid JWT -> Expect 200 { success: true }',
-          'GET /api/me with malformed string -> Expect 401',
-        ],
-        analyzedAt: new Date(),
-      },
-    });
+        github: {
+          connected: true,
+          owner: 'devflow-ai',
+          repository: 'cloud-sync',
+          url: 'https://github.com/devflow-ai/cloud-sync',
+          defaultBranch: 'main',
+          stars: 87,
+          forks: 14,
+          openIssues: 4,
+          connectedAt: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000),
+          connectedBy: demoUser._id,
+        },
+        githubRepository: {
+          connected: true,
+          owner: 'devflow-ai',
+          repo: 'cloud-sync',
+          url: 'https://github.com/devflow-ai/cloud-sync',
+          defaultBranch: 'main',
+          connectedAt: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000),
+        },
+        settings: {
+          autoCloseOnMerge: true,
+        },
+      });
+      console.log('[Seed] Created SYNC project');
+    } else {
+      const isMember = syncProject.members.some(
+        (m) => m.user.toString() === demoUser._id.toString()
+      );
+      if (!isMember) {
+        syncProject.members.push({ user: demoUser._id, role: 'ADMIN' });
+        await syncProject.save();
+      }
+    }
 
-    const pr42 = await PullRequest.create({
-      project: project._id,
-      prNumber: 42,
-      title: 'Add compound database index on Issue collection (Resolves #118)',
-      body: 'Adds { project: 1, status: 1 } and { project: 1, issueNumber: 1 } compound indexes to eliminate slow table scans on Kanban load.\n\nResolves #118',
-      htmlUrl: 'https://github.com/devflow-ai/devflow-core/pull/42',
-      author: { login: ananya.githubUsername, avatarUrl: ananya.avatar },
-      status: 'MERGED',
-      headBranch: 'perf/issue-indexes',
-      baseBranch: 'main',
-      changedFilesCount: 2,
-      additions: 18,
-      deletions: 2,
-      aiAnalysis: {
-        issueAlignment: 'HIGH',
-        confidence: 96,
-        summary: 'Adds indexes directly targeting the queried fields identified in the performance bug report.',
-        potentialConcerns: ['Verify background index build in production during high write throughput'],
-        suggestedTests: ['Run EXPLAIN() query plan on getIssues to verify IXSCAN index hit'],
-        analyzedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+    // 3. Independent Pull Requests Verification & Creation
+    const prsData = [
+      {
+        prNumber: 48,
+        title: 'Fix JWT expiration handling in authMiddleware (Fixes #124)',
+        body: 'Catch TokenExpiredError explicitly and return HTTP 401 instead of bubbling unhandled exception to 500.\n\nCloses #124',
+        htmlUrl: 'https://github.com/devflow-ai/devflow-core/pull/48',
+        author: { login: rahul.githubUsername, avatarUrl: rahul.avatar },
+        status: 'OPEN',
+        headBranch: 'fix/jwt-expiration',
+        baseBranch: 'main',
+        changedFilesCount: 3,
+        additions: 38,
+        deletions: 9,
+        aiAnalysis: {
+          issueAlignment: 'HIGH',
+          confidence: 94,
+          summary: 'PR properly intercepts TokenExpiredError in authMiddleware and returns 401 Unauthorized with standard error response envelope.',
+          potentialConcerns: [
+            'Verify refresh token endpoint still accepts expired access tokens for token rotation',
+            'Ensure test suite covers tampered signature as well as expired timestamp',
+          ],
+          suggestedTests: [
+            'GET /api/me with expired JWT -> Expect 401 { success: false, message: "Token expired" }',
+            'GET /api/me with valid JWT -> Expect 200 { success: true }',
+            'GET /api/me with malformed string -> Expect 401',
+          ],
+          analyzedAt: new Date(),
+        },
       },
-    });
-
-    const pr55 = await PullRequest.create({
-      project: project._id,
-      prNumber: 55,
-      title: 'feat: add GitHub webhook signature verification (Fixes #125)',
-      body: 'Validates HMAC-SHA256 signature using timingSafeEqual to protect against timing attacks.\n\nFixes #125',
-      htmlUrl: 'https://github.com/devflow-ai/devflow-core/pull/55',
-      author: { login: vikram.githubUsername, avatarUrl: vikram.avatar },
-      status: 'OPEN',
-      headBranch: 'feat/webhook-security',
-      baseBranch: 'main',
-      changedFilesCount: 4,
-      additions: 64,
-      deletions: 12,
-      aiAnalysis: {
-        issueAlignment: 'HIGH',
-        confidence: 91,
-        summary: 'Implements standard crypto.timingSafeEqual and verifies X-Hub-Signature-256 header.',
-        potentialConcerns: ['Ensure raw request body is captured before JSON parser mutates whitespace'],
-        suggestedTests: [
-          'Send valid signature -> Expect 200',
-          'Send invalid signature -> Expect 401',
-          'Send missing signature header -> Expect 401',
-        ],
-        analyzedAt: new Date(),
+      {
+        prNumber: 42,
+        title: 'Add compound database index on Issue collection (Resolves #118)',
+        body: 'Adds { project: 1, status: 1 } and { project: 1, issueNumber: 1 } compound indexes to eliminate slow table scans on Kanban load.\n\nResolves #118',
+        htmlUrl: 'https://github.com/devflow-ai/devflow-core/pull/42',
+        author: { login: ananya.githubUsername, avatarUrl: ananya.avatar },
+        status: 'MERGED',
+        headBranch: 'perf/issue-indexes',
+        baseBranch: 'main',
+        changedFilesCount: 2,
+        additions: 18,
+        deletions: 2,
+        aiAnalysis: {
+          issueAlignment: 'HIGH',
+          confidence: 96,
+          summary: 'Adds indexes directly targeting the queried fields identified in the performance bug report.',
+          potentialConcerns: ['Verify background index build in production during high write throughput'],
+          suggestedTests: ['Run EXPLAIN() query plan on getIssues to verify IXSCAN index hit'],
+          analyzedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+        },
       },
-    });
+      {
+        prNumber: 55,
+        title: 'feat: add GitHub webhook signature verification (Fixes #125)',
+        body: 'Validates HMAC-SHA256 signature using timingSafeEqual to protect against timing attacks.\n\nFixes #125',
+        htmlUrl: 'https://github.com/devflow-ai/devflow-core/pull/55',
+        author: { login: vikram.githubUsername, avatarUrl: vikram.avatar },
+        status: 'OPEN',
+        headBranch: 'feat/webhook-security',
+        baseBranch: 'main',
+        changedFilesCount: 4,
+        additions: 64,
+        deletions: 12,
+        aiAnalysis: {
+          issueAlignment: 'HIGH',
+          confidence: 91,
+          summary: 'Implements standard crypto.timingSafeEqual and verifies X-Hub-Signature-256 header.',
+          potentialConcerns: ['Ensure raw request body is captured before JSON parser mutates whitespace'],
+          suggestedTests: [
+            'Send valid signature -> Expect 200',
+            'Send invalid signature -> Expect 401',
+            'Send missing signature header -> Expect 401',
+          ],
+          analyzedAt: new Date(),
+        },
+      },
+    ];
 
-    // 4. Create Issues
-    const issuesData = [
+    const prMap = new Map();
+    for (const prItem of prsData) {
+      let pr = await PullRequest.findOne({ project: flowProject._id, prNumber: prItem.prNumber });
+      if (!pr) {
+        pr = await PullRequest.create({ ...prItem, project: flowProject._id });
+        console.log(`[Seed] Created PR #${prItem.prNumber}`);
+      }
+      prMap.set(prItem.prNumber, pr);
+    }
+
+    // 4. Independent Issues Verification & Creation (FLOW)
+    const flowIssuesData = [
       {
         issueNumber: 124,
         title: 'Fix JWT expiration bug returning HTTP 500 instead of 401',
@@ -188,9 +340,8 @@ export const seedDatabase = async () => {
         priority: 'HIGH',
         labels: ['backend', 'authentication', 'security'],
         reporter: astha._id,
-        assignee: rahul._id,
-        project: project._id,
-        linkedPullRequests: [pr48._id],
+        assignee: demoUser._id, // Assigned to Demo Lead so active dashboard displays assigned issue
+        linkedPullRequests: prMap.get(48) ? [prMap.get(48)._id] : [],
         aiAnalysis: {
           issueType: 'BUG',
           priority: 'HIGH',
@@ -238,8 +389,7 @@ Return HTTP 401 with JSON: { "success": false, "message": "Token expired" }
         labels: ['database', 'performance', 'backend'],
         reporter: rahul._id,
         assignee: ananya._id,
-        project: project._id,
-        linkedPullRequests: [pr42._id],
+        linkedPullRequests: prMap.get(42) ? [prMap.get(42)._id] : [],
         aiAnalysis: {
           issueType: 'IMPROVEMENT',
           priority: 'MEDIUM',
@@ -262,10 +412,9 @@ Return HTTP 401 with JSON: { "success": false, "message": "Token expired" }
         status: 'IN_PROGRESS',
         priority: 'CRITICAL',
         labels: ['security', 'github', 'backend'],
-        reporter: astha._id,
+        reporter: demoUser._id,
         assignee: vikram._id,
-        project: project._id,
-        linkedPullRequests: [pr55._id],
+        linkedPullRequests: prMap.get(55) ? [prMap.get(55)._id] : [],
         aiAnalysis: {
           issueType: 'BUG',
           priority: 'CRITICAL',
@@ -290,7 +439,6 @@ Return HTTP 401 with JSON: { "success": false, "message": "Token expired" }
         labels: ['frontend', 'ui/ux', 'accessibility'],
         reporter: dev._id,
         assignee: ananya._id,
-        project: project._id,
         linkedPullRequests: [],
         aiAnalysis: {
           issueType: 'BUG',
@@ -315,7 +463,6 @@ Return HTTP 401 with JSON: { "success": false, "message": "Token expired" }
         labels: ['github', 'feature', 'integrations'],
         reporter: rahul._id,
         assignee: null,
-        project: project._id,
         linkedPullRequests: [],
         aiAnalysis: {
           issueType: 'FEATURE',
@@ -339,8 +486,7 @@ Return HTTP 401 with JSON: { "success": false, "message": "Token expired" }
         priority: 'HIGH',
         labels: ['backend', 'networking', 'api'],
         reporter: astha._id,
-        assignee: vikram._id,
-        project: project._id,
+        assignee: demoUser._id, // Also assigned to Demo Lead
         linkedPullRequests: [],
         aiAnalysis: {
           issueType: 'BUG',
@@ -365,7 +511,6 @@ Return HTTP 401 with JSON: { "success": false, "message": "Token expired" }
         labels: ['frontend', 'ui/ux'],
         reporter: dev._id,
         assignee: rahul._id,
-        project: project._id,
         linkedPullRequests: [],
         aiAnalysis: {
           issueType: 'IMPROVEMENT',
@@ -390,7 +535,6 @@ Return HTTP 401 with JSON: { "success": false, "message": "Token expired" }
         labels: ['documentation'],
         reporter: astha._id,
         assignee: astha._id,
-        project: project._id,
         linkedPullRequests: [],
       },
       {
@@ -403,17 +547,20 @@ Return HTTP 401 with JSON: { "success": false, "message": "Token expired" }
         labels: ['security', 'maintenance'],
         reporter: vikram._id,
         assignee: vikram._id,
-        project: project._id,
         linkedPullRequests: [],
       },
     ];
 
-    const createdIssues = [];
-    for (const item of issuesData) {
-      const issue = await Issue.create(item);
-      createdIssues.push(issue);
+    const issueMap = new Map();
+    for (const item of flowIssuesData) {
+      let issue = await Issue.findOne({ project: flowProject._id, issueNumber: item.issueNumber });
+      if (!issue) {
+        issue = await Issue.create({ ...item, project: flowProject._id });
+        console.log(`[Seed] Created FLOW issue #${item.issueNumber}: ${item.title}`);
+      }
+      issueMap.set(item.issueNumber, issue);
 
-      // Associate issue back to PR
+      // Associate issue back to linked PR
       if (item.linkedPullRequests && item.linkedPullRequests.length > 0) {
         for (const prId of item.linkedPullRequests) {
           await PullRequest.findByIdAndUpdate(prId, { issue: issue._id });
@@ -421,132 +568,294 @@ Return HTTP 401 with JSON: { "success": false, "message": "Token expired" }
       }
     }
 
-    // 5. Create Comments
-    const issue124 = createdIssues[0];
-    await Comment.create({
-      issue: issue124._id,
-      author: rahul._id,
-      content: 'I reproduced this in Postman. The TokenExpiredError is thrown by jwt.verify in authMiddleware and hits errorHandler which defaults to 500. I am opening PR #48 with the fix.',
-    });
-    await Comment.create({
-      issue: issue124._id,
-      author: astha._id,
-      content: 'Great find Rahul! Please make sure to check that refresh token endpoints still function as expected.',
-    });
-    await Comment.create({
-      issue: issue124._id,
-      author: rahul._id,
-      content: 'Tested with refresh token rotation and verified with the AI PR analyzer test cases. Looks solid!',
-    });
-
-    // 6. Create Activities
-    const activityItems = [
+    // 5. Independent Issues Verification & Creation (SYNC)
+    const syncIssuesData = [
       {
-        project: project._id,
-        issue: issue124._id,
-        actor: astha._id,
-        action: 'CREATED_ISSUE',
-        entityType: 'ISSUE',
-        entityId: issue124._id.toString(),
-        metadata: { issueNumber: 124, title: issue124.title },
-        timestamp: new Date(Date.now() - 48 * 60 * 60 * 1000),
+        issueNumber: 1,
+        title: 'S3 multipart upload timeout on large assets (>500MB)',
+        description: 'Large chunked uploads exceed the 30-second socket timeout when uploading to remote cloud storage on constrained edge connections.',
+        type: 'BUG',
+        status: 'IN_PROGRESS',
+        priority: 'HIGH',
+        labels: ['storage', 'aws', 'backend'],
+        reporter: demoUser._id,
+        assignee: rahul._id,
+        aiAnalysis: {
+          issueType: 'BUG',
+          priority: 'HIGH',
+          suggestedLabels: ['storage', 'aws'],
+          summary: 'S3 client timeout parameter is insufficient for sustained chunked streams.',
+          possibleRootCause: 'Default HTTP agent keeps socket open without adjusting idle timeout for large multipart byte buffers.',
+          confidence: 0.92,
+          analyzedAt: new Date(),
+        },
       },
       {
-        project: project._id,
-        issue: issue124._id,
-        actor: astha._id,
-        action: 'AI_ANALYZED',
-        entityType: 'ISSUE',
-        entityId: issue124._id.toString(),
-        metadata: { confidence: 0.94 },
-        timestamp: new Date(Date.now() - 47 * 60 * 60 * 1000),
+        issueNumber: 2,
+        title: 'Implement WebSocket heartbeat for distributed edge nodes',
+        description: 'Add a 15-second bidirectional ping-pong heartbeat mechanism so idle edge proxy nodes are not severed by upstream load balancer timeouts.',
+        type: 'FEATURE',
+        status: 'OPEN',
+        priority: 'MEDIUM',
+        labels: ['networking', 'realtime'],
+        reporter: demoUser._id,
+        assignee: ananya._id,
       },
       {
-        project: project._id,
-        issue: issue124._id,
-        actor: astha._id,
-        action: 'ASSIGNED_USER',
-        entityType: 'ISSUE',
-        entityId: issue124._id.toString(),
-        metadata: { assignee: 'Rahul Verma' },
-        timestamp: new Date(Date.now() - 46 * 60 * 60 * 1000),
+        issueNumber: 3,
+        title: 'Memory leak in chunk streaming buffer during backpressure',
+        description: 'When consumer write stream pauses on backpressure, the internal byte queue retains detached chunks in V8 heap.',
+        type: 'BUG',
+        status: 'RESOLVED',
+        priority: 'CRITICAL',
+        labels: ['memory', 'node.js', 'streams'],
+        reporter: rahul._id,
+        assignee: demoUser._id,
+        aiAnalysis: {
+          issueType: 'BUG',
+          priority: 'CRITICAL',
+          suggestedLabels: ['memory', 'streams'],
+          summary: 'V8 heap memory accumulates because pause() event does not flush write buffers before receiving next chunk.',
+          possibleRootCause: 'Missing highWaterMark backpressure flow control handler on readable stream pipeline.',
+          confidence: 0.97,
+          analyzedAt: new Date(),
+        },
       },
       {
-        project: project._id,
-        issue: issue124._id,
-        actor: rahul._id,
-        action: 'GENERATED_FIX_PROMPT',
-        entityType: 'ISSUE',
-        entityId: issue124._id.toString(),
-        timestamp: new Date(Date.now() - 36 * 60 * 60 * 1000),
-      },
-      {
-        project: project._id,
-        issue: issue124._id,
-        actor: rahul._id,
-        action: 'LINKED_PR',
-        entityType: 'PR',
-        entityId: pr48._id.toString(),
-        metadata: { prNumber: 48, prTitle: pr48.title },
-        timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000),
-      },
-      {
-        project: project._id,
-        issue: issue124._id,
-        actor: rahul._id,
-        action: 'UPDATED_STATUS',
-        entityType: 'ISSUE',
-        entityId: issue124._id.toString(),
-        metadata: { from: 'IN_PROGRESS', to: 'IN_REVIEW' },
-        timestamp: new Date(Date.now() - 12 * 60 * 60 * 1000),
-      },
-      {
-        project: project._id,
-        actor: astha._id,
-        action: 'CONNECTED_GITHUB',
-        entityType: 'PROJECT',
-        entityId: project._id.toString(),
-        metadata: { repository: 'devflow-ai/devflow-core' },
-        timestamp: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+        issueNumber: 4,
+        title: 'Benchmark and optimize Redis pub/sub queue throughput',
+        description: 'Profile throughput under 10k concurrent pub/sub events per second to ensure sub-millisecond message delivery latency.',
+        type: 'IMPROVEMENT',
+        status: 'CLOSED',
+        priority: 'LOW',
+        labels: ['redis', 'performance'],
+        reporter: demoUser._id,
+        assignee: demoUser._id,
       },
     ];
 
-    await Activity.insertMany(activityItems);
+    for (const item of syncIssuesData) {
+      let syncIssue = await Issue.findOne({ project: syncProject._id, issueNumber: item.issueNumber });
+      if (!syncIssue) {
+        await Issue.create({ ...item, project: syncProject._id });
+        console.log(`[Seed] Created SYNC issue #${item.issueNumber}: ${item.title}`);
+      }
+    }
 
-    // 7. Create Notifications
-    await Notification.create({
-      recipient: rahul._id,
-      sender: astha._id,
-      project: project._id,
-      issue: issue124._id,
-      title: 'Assigned to Issue #124',
-      message: 'Astha Sharma assigned you to "Fix JWT expiration bug returning HTTP 500 instead of 401"',
-      type: 'ASSIGNED',
-      read: false,
-    });
-    await Notification.create({
-      recipient: rahul._id,
-      sender: astha._id,
-      project: project._id,
-      issue: issue124._id,
-      title: 'New Comment on #124',
-      message: 'Astha Sharma replied to your comment on #124',
-      type: 'COMMENT',
-      read: false,
-    });
-    await Notification.create({
-      recipient: astha._id,
-      sender: rahul._id,
-      project: project._id,
-      issue: issue124._id,
-      title: 'PR #48 Linked to Issue #124',
-      message: 'Rahul Verma linked Pull Request #48 "Fix JWT expiration handling in authMiddleware"',
-      type: 'PR_LINKED',
-      read: true,
-    });
+    // 6. Independent Comments Verification & Creation
+    const issue124 = issueMap.get(124);
+    if (issue124) {
+      const commentsData = [
+        {
+          issue: issue124._id,
+          author: rahul._id,
+          content: 'I reproduced this in Postman. The TokenExpiredError is thrown by jwt.verify in authMiddleware and hits errorHandler which defaults to 500. I am opening PR #48 with the fix.',
+        },
+        {
+          issue: issue124._id,
+          author: astha._id,
+          content: 'Great find Rahul! Please make sure to check that refresh token endpoints still function as expected.',
+        },
+        {
+          issue: issue124._id,
+          author: demoUser._id,
+          content: 'Reviewed PR #48 with AI analysis test cases. Signature verification and expiration envelope look solid!',
+        },
+      ];
 
-    console.log('[Seed] Database successfully seeded with 5 users, 9 realistic issues, 3 PRs, comments, activities, and notifications!');
+      for (const c of commentsData) {
+        const existingComment = await Comment.findOne({
+          issue: c.issue,
+          author: c.author,
+          content: c.content,
+        });
+        if (!existingComment) {
+          await Comment.create(c);
+        }
+      }
+    }
+
+    // 7. Independent Activities Verification & Creation
+    if (issue124) {
+      const pr48 = prMap.get(48);
+      const activityItems = [
+        {
+          project: flowProject._id,
+          issue: issue124._id,
+          actor: astha._id,
+          action: 'CREATED_ISSUE',
+          entityType: 'ISSUE',
+          entityId: issue124._id.toString(),
+          metadata: { issueNumber: 124, title: issue124.title },
+          timestamp: new Date(Date.now() - 48 * 60 * 60 * 1000),
+        },
+        {
+          project: flowProject._id,
+          issue: issue124._id,
+          actor: astha._id,
+          action: 'AI_ANALYZED',
+          entityType: 'ISSUE',
+          entityId: issue124._id.toString(),
+          metadata: { confidence: 0.94 },
+          timestamp: new Date(Date.now() - 47 * 60 * 60 * 1000),
+        },
+        {
+          project: flowProject._id,
+          issue: issue124._id,
+          actor: astha._id,
+          action: 'ASSIGNED_USER',
+          entityType: 'ISSUE',
+          entityId: issue124._id.toString(),
+          metadata: { assignee: 'Demo Lead' },
+          timestamp: new Date(Date.now() - 46 * 60 * 60 * 1000),
+        },
+        {
+          project: flowProject._id,
+          issue: issue124._id,
+          actor: demoUser._id,
+          action: 'GENERATED_FIX_PROMPT',
+          entityType: 'ISSUE',
+          entityId: issue124._id.toString(),
+          timestamp: new Date(Date.now() - 36 * 60 * 60 * 1000),
+        },
+        ...(pr48
+          ? [
+              {
+                project: flowProject._id,
+                issue: issue124._id,
+                actor: rahul._id,
+                action: 'LINKED_PR',
+                entityType: 'PR',
+                entityId: pr48._id.toString(),
+                metadata: { prNumber: 48, prTitle: pr48.title },
+                timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000),
+              },
+            ]
+          : []),
+        {
+          project: flowProject._id,
+          issue: issue124._id,
+          actor: rahul._id,
+          action: 'UPDATED_STATUS',
+          entityType: 'ISSUE',
+          entityId: issue124._id.toString(),
+          metadata: { from: 'IN_PROGRESS', to: 'IN_REVIEW' },
+          timestamp: new Date(Date.now() - 12 * 60 * 60 * 1000),
+        },
+        {
+          project: flowProject._id,
+          actor: demoUser._id,
+          action: 'CONNECTED_GITHUB',
+          entityType: 'PROJECT',
+          entityId: flowProject._id.toString(),
+          metadata: { repository: 'devflow-ai/devflow-core' },
+          timestamp: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+        },
+      ];
+
+      for (const act of activityItems) {
+        const existingAct = await Activity.findOne({
+          project: act.project,
+          action: act.action,
+          entityId: act.entityId,
+        });
+        if (!existingAct) {
+          await Activity.create(act);
+        }
+      }
+    }
+
+    // 8. Independent Notifications Verification & Creation
+    const issue125 = issueMap.get(125);
+    const notificationsData = [
+      ...(issue124
+        ? [
+            {
+              recipient: demoUser._id,
+              sender: astha._id,
+              project: flowProject._id,
+              issue: issue124._id,
+              title: 'Assigned to Issue #124',
+              message: 'Astha Sharma assigned you to "Fix JWT expiration bug returning HTTP 500 instead of 401"',
+              type: 'ASSIGNED',
+              read: false,
+            },
+            {
+              recipient: demoUser._id,
+              sender: rahul._id,
+              project: flowProject._id,
+              issue: issue124._id,
+              title: 'PR #48 Linked to Issue #124',
+              message: 'Rahul Verma linked Pull Request #48 "Fix JWT expiration handling in authMiddleware"',
+              type: 'PR_LINKED',
+              read: false,
+            },
+            {
+              recipient: rahul._id,
+              sender: demoUser._id,
+              project: flowProject._id,
+              issue: issue124._id,
+              title: 'New Comment on #124',
+              message: 'Demo Lead replied to your comment on #124',
+              type: 'COMMENT',
+              read: true,
+            },
+          ]
+        : []),
+      ...(issue125
+        ? [
+            {
+              recipient: demoUser._id,
+              sender: astha._id,
+              project: flowProject._id,
+              issue: issue125._id,
+              title: 'AI Security Alert on #125',
+              message: 'AI Issue Triage flagged #125 as CRITICAL severity with 98% confidence',
+              type: 'AI_ALERT',
+              read: false,
+            },
+          ]
+        : []),
+    ];
+
+    for (const notif of notificationsData) {
+      const existingNotif = await Notification.findOne({
+        recipient: notif.recipient,
+        project: notif.project,
+        title: notif.title,
+      });
+      if (!existingNotif) {
+        await Notification.create(notif);
+      }
+    }
+
+    console.log('[Seed] Demonstration dataset verified and ready! Demo account: ' + demoUserEmail);
   } catch (err) {
-    console.error('[Seed] Error seeding data:', err);
+    console.error('[Seed] Error checking or seeding demo data:', err);
   }
 };
+
+// Support running directly via `node src/utils/seedData.js` or `npm run seed`
+const isDirectRun = () => {
+  if (!process.argv[1]) return false;
+  const scriptPath = path.resolve(process.argv[1]);
+  const modulePath = path.resolve(fileURLToPath(import.meta.url));
+  return scriptPath === modulePath;
+};
+
+if (isDirectRun()) {
+  (async () => {
+    try {
+      dotenv.config();
+      const { connectDB, closeDB } = await import('../config/db.js');
+      await connectDB();
+      await seedDatabase();
+      await closeDB();
+      console.log('[Seed] Standalone seed run completed successfully.');
+      process.exit(0);
+    } catch (err) {
+      console.error('[Seed] Standalone seed run failed:', err);
+      process.exit(1);
+    }
+  })();
+}

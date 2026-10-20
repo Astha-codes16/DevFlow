@@ -11,6 +11,7 @@ export default function AppLayout() {
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isCreateIssueOpen, setIsCreateIssueOpen] = useState(false);
   const [isWebhookSimOpen, setIsWebhookSimOpen] = useState(false);
+  const [creationNotice, setCreationNotice] = useState('');
   const { refreshActiveProject } = useProject();
 
   // Global keyboard shortcut for Ctrl + K / Cmd + K
@@ -27,6 +28,12 @@ export default function AppLayout() {
 
   const handleWebhookFired = () => {
     refreshActiveProject();
+  };
+
+  const handleIssueCreated = (_issue, warning) => {
+    if (!warning) return;
+    setCreationNotice(warning);
+    window.setTimeout(() => setCreationNotice(''), 5000);
   };
 
   return (
@@ -47,6 +54,12 @@ export default function AppLayout() {
         </main>
       </div>
 
+      {creationNotice && (
+        <div role="status" className="fixed right-5 top-20 z-50 max-w-sm rounded-xl border border-amber-500/30 bg-amber-500/15 px-4 py-3 text-xs text-amber-200 shadow-lg">
+          {creationNotice}
+        </div>
+      )}
+
       <CommandPalette
         isOpen={isCommandPaletteOpen}
         onClose={() => setIsCommandPaletteOpen(false)}
@@ -56,6 +69,7 @@ export default function AppLayout() {
       <CreateIssueModal
         isOpen={isCreateIssueOpen}
         onClose={() => setIsCreateIssueOpen(false)}
+        onCreated={handleIssueCreated}
       />
 
       <WebhookSimulatorModal

@@ -8,6 +8,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "seed": "node src/utils/seedData.js",
+    "cleanup:demo": "node src/utils/cleanupDemoData.js",
     "test": "node --test src/tests/*.test.js"
   },
   "dependencies": {

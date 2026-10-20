@@ -8,6 +8,7 @@ import { Project } from '../models/Project.js';
 import { PullRequest } from '../models/PullRequest.js';
 import { Activity } from '../models/Activity.js';
 import { githubClient } from '../services/github/githubClient.js';
+import { assertSameProject, requireProjectAccess } from '../middleware/projectAccess.js';
 
 export const analyzeIssueHandler = async (req, res, next) => {
   try {
@@ -21,6 +22,18 @@ export const analyzeIssueHandler = async (req, res, next) => {
     }
 
     let projectFiles = [];
+    let issue = null;
+    if (issueId) {
+      issue = await Issue.findById(issueId);
+      if (!issue) {
+        return res.status(404).json({ success: false, message: 'Issue not found' });
+      }
+      if (projectId) assertSameProject(issue.project, projectId);
+      await requireProjectAccess(issue.project, req.user);
+    } else if (projectId) {
+      await requireProjectAccess(projectId, req.user);
+    }
+
     if (projectId) {
       const project = await Project.findById(projectId);
       if (project?.githubRepository?.connected) {
@@ -34,10 +47,8 @@ export const analyzeIssueHandler = async (req, res, next) => {
     const analysis = await analyzeIssue({ title, description, projectFiles });
 
     // If an existing issueId was specified, persist the analysis to the issue
-    if (issueId) {
-      const issue = await Issue.findById(issueId);
-      if (issue) {
-        issue.aiAnalysis = {
+    if (issue) {
+      issue.aiAnalysis = {
           issueType: analysis.issueType,
           priority: analysis.priority,
           suggestedLabels: analysis.suggestedLabels,
@@ -45,24 +56,23 @@ export const analyzeIssueHandler = async (req, res, next) => {
           possibleRootCause: analysis.possibleRootCause,
           confidence: analysis.confidence,
           analyzedAt: new Date(),
-        };
+      };
 
-        if (analysis.relevantCode && analysis.relevantCode.length > 0) {
-          issue.relevantCode = analysis.relevantCode;
-        }
-
-        await issue.save();
-
-        await Activity.create({
-          project: issue.project,
-          issue: issue._id,
-          actor: req.user._id,
-          action: 'AI_ANALYZED',
-          entityType: 'ISSUE',
-          entityId: issue._id.toString(),
-          metadata: { confidence: analysis.confidence },
-        });
+      if (analysis.relevantCode && analysis.relevantCode.length > 0) {
+        issue.relevantCode = analysis.relevantCode;
       }
+
+      await issue.save();
+
+      await Activity.create({
+        project: issue.project,
+        issue: issue._id,
+        actor: req.user._id,
+        action: 'AI_ANALYZED',
+        entityType: 'ISSUE',
+        entityId: issue._id.toString(),
+        metadata: { confidence: analysis.confidence },
+      });
     }
 
     res.status(200).json({
@@ -85,6 +95,7 @@ export const generateFixPromptHandler = async (req, res, next) => {
     if (!issue) {
       return res.status(404).json({ success: false, message: 'Issue not found' });
     }
+    await requireProjectAccess(issue.project._id, req.user);
 
     const project = issue.project;
     const relevantFiles = issue.relevantCode && issue.relevantCode.length > 0
@@ -137,6 +148,7 @@ export const detectDuplicatesHandler = async (req, res, next) => {
         message: 'ProjectId and title are required for duplicate detection',
       });
     }
+    await requireProjectAccess(projectId, req.user);
 
     const duplicates = await findPotentialDuplicates({
       projectId,
@@ -162,11 +174,13 @@ export const analyzePRHandler = async (req, res, next) => {
     if (!pullRequest) {
       return res.status(404).json({ success: false, message: 'Pull request not found' });
     }
+    await requireProjectAccess(pullRequest.project, req.user);
 
     const issue = await Issue.findById(issueId || pullRequest.issue);
     if (!issue) {
       return res.status(404).json({ success: false, message: 'Issue not found for PR comparison' });
     }
+    assertSameProject(pullRequest.project, issue.project);
 
     let changedFiles = pullRequest.changedFiles || [];
 
@@ -209,6 +223,7 @@ export const analyzePRHandler = async (req, res, next) => {
 export const getProjectInsightsHandler = async (req, res, next) => {
   try {
     const { projectId } = req.params;
+    await requireProjectAccess(projectId, req.user);
     const insights = await generateProjectInsights(projectId);
 
     res.status(200).json({

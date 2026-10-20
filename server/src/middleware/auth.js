@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { User } from '../models/User.js';
+import { getJwtSecret } from '../config/security.js';
 
 export const authenticateUser = async (req, res, next) => {
   let token = null;
@@ -21,7 +22,7 @@ export const authenticateUser = async (req, res, next) => {
   try {
     const decoded = jwt.verify(
       token,
-      process.env.JWT_SECRET || 'devflow_super_secret_jwt_key_2026_production_grade'
+      getJwtSecret()
     );
     const user = await User.findById(decoded.id).select('-password');
 
