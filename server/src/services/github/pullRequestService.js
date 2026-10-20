@@ -2,6 +2,7 @@ import { githubClient } from './githubClient.js';
 import { PullRequest } from '../../models/PullRequest.js';
 import { linkPRToIssues } from './issueLinker.js';
 import { normalizeRepoInput } from './repositoryService.js';
+import { pullRequestLifecycleService } from './pullRequestLifecycleService.js';
 
 export class PullRequestService {
   /**
@@ -127,6 +128,8 @@ export class PullRequestService {
 
       const prData = {
         project: project._id,
+        repositoryOwner: owner,
+        repositoryName: repo,
         prNumber: pr.prNumber,
         title: pr.title,
         body: pr.body,
@@ -154,18 +157,35 @@ export class PullRequestService {
         })),
       };
 
+      const existingPullRequest = await PullRequest.findOne({
+        project: project._id,
+        prNumber: pr.prNumber,
+      });
+      if (
+        existingPullRequest &&
+        ((existingPullRequest.repositoryOwner && existingPullRequest.repositoryOwner.toLowerCase() !== owner.toLowerCase()) ||
+          (existingPullRequest.repositoryName && existingPullRequest.repositoryName.toLowerCase() !== repo.toLowerCase()))
+      ) {
+        console.warn(`[PullRequestService] Skipping PR #${pr.prNumber}: repository identity mismatch.`);
+        continue;
+      }
+
       const pullRequest = await PullRequest.findOneAndUpdate(
         { project: project._id, prNumber: pr.prNumber },
         { $set: prData },
         { upsert: true, new: true }
       );
 
-      // Run issue linking
-      await linkPRToIssues({
+      const isMerged = pr.status === 'MERGED' || Boolean(pr.mergedAt);
+      const action = isMerged ? 'closed' : pr.status === 'CLOSED' ? 'closed' : 'sync';
+
+      await pullRequestLifecycleService.syncPullRequestLifecycle({
+        project,
         pullRequest,
-        projectId: project._id,
-        projectKey: project.key,
+        action,
+        isMerged,
         actorId: userId,
+        changedFiles: prData.changedFiles,
       });
 
       synced.push(pullRequest);

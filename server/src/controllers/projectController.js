@@ -5,6 +5,7 @@ import { User } from '../models/User.js';
 import { Activity } from '../models/Activity.js';
 import { Notification } from '../models/Notification.js';
 import { PullRequest } from '../models/PullRequest.js';
+import { IssuePullRequest } from '../models/IssuePullRequest.js';
 import { repositoryService, normalizeRepoInput } from '../services/github/repositoryService.js';
 import { pullRequestService } from '../services/github/pullRequestService.js';
 import { requireProjectAccess } from '../middleware/projectAccess.js';
@@ -133,6 +134,7 @@ export const deleteProject = async (req, res, next) => {
       Project.deleteOne({ _id: project._id }),
       Issue.deleteMany({ project: project._id }),
       PullRequest.deleteMany({ project: project._id }),
+      IssuePullRequest.deleteMany({ project: project._id }),
       Activity.deleteMany({ project: project._id }),
       Notification.deleteMany({ project: project._id }),
       Comment.deleteMany({ issue: { $in: issueIds } }),

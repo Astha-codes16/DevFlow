@@ -3,6 +3,7 @@ import { Project } from '../models/Project.js';
 import { Comment } from '../models/Comment.js';
 import { Activity } from '../models/Activity.js';
 import { Notification } from '../models/Notification.js';
+import { IssuePullRequest } from '../models/IssuePullRequest.js';
 import { assertProjectMember, requireProjectAccess } from '../middleware/projectAccess.js';
 
 export const createIssue = async (req, res, next) => {
@@ -293,6 +294,7 @@ export const deleteIssue = async (req, res, next) => {
 
     await Promise.all([
       Issue.findByIdAndDelete(req.params.id),
+      IssuePullRequest.deleteMany({ issue: req.params.id }),
       Comment.deleteMany({ issue: req.params.id }),
       Activity.deleteMany({ issue: req.params.id }),
     ]);

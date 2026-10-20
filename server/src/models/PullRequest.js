@@ -13,6 +13,22 @@ const pullRequestSchema = new mongoose.Schema(
       ref: 'Issue',
       index: true,
     },
+    linkedIssues: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Issue',
+      },
+    ],
+    repositoryOwner: {
+      type: String,
+      default: '',
+      index: true,
+    },
+    repositoryName: {
+      type: String,
+      default: '',
+      index: true,
+    },
     prNumber: {
       type: Number,
       required: true,
@@ -97,5 +113,6 @@ const pullRequestSchema = new mongoose.Schema(
 );
 
 pullRequestSchema.index({ project: 1, prNumber: 1 }, { unique: true });
+pullRequestSchema.index({ project: 1, linkedIssues: 1 });
 
 export const PullRequest = mongoose.model('PullRequest', pullRequestSchema);
