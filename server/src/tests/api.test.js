@@ -11,6 +11,7 @@ import { Project } from '../models/Project.js';
 import { Issue } from '../models/Issue.js';
 import { Comment } from '../models/Comment.js';
 import { PullRequest } from '../models/PullRequest.js';
+import { IssuePullRequest } from '../models/IssuePullRequest.js';
 import { Notification } from '../models/Notification.js';
 import { Activity } from '../models/Activity.js';
 import { WebhookDelivery } from '../models/WebhookDelivery.js';
@@ -20,6 +21,7 @@ import { heuristicAnalyzeIssue } from '../services/ai/issueAnalyzer.js';
 import { normalizeRepoInput } from '../services/github/repositoryService.js';
 import { githubClient } from '../services/github/githubClient.js';
 import { pullRequestService } from '../services/github/pullRequestService.js';
+import { linkIssueToPullRequest, linkPRToIssues, unlinkPRFromIssue } from '../services/github/issueLinker.js';
 
 let mongoServer;
 let authToken = '';
@@ -732,6 +734,762 @@ describe('DevFlow AI Test Suite', () => {
         assert.strictEqual(dbIssueAfter.linkedPullRequests.length, 0);
       } finally {
         pullRequestService.getPullRequestDetails = origGetDetails;
+      }
+    });
+
+    test('issue and pull request relationships support many-to-many linking without duplicates', async () => {
+      const issueARes = await request(app)
+        .post('/api/issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ project: testProjectId, title: 'Many-to-many issue A', description: 'First relationship fixture' });
+      const issueBRes = await request(app)
+        .post('/api/issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ project: testProjectId, title: 'Many-to-many issue B', description: 'Second relationship fixture' });
+      assert.strictEqual(issueARes.status, 201);
+      assert.strictEqual(issueBRes.status, 201);
+
+      const issueA = await Issue.findById(issueARes.body.issue._id);
+      const issueB = await Issue.findById(issueBRes.body.issue._id);
+      const pullRequestOne = await PullRequest.create({
+        project: testProjectId,
+        prNumber: 201,
+        title: 'First relationship PR',
+        htmlUrl: 'https://github.com/test-org/test-repo/pull/201',
+      });
+      const pullRequestTwo = await PullRequest.create({
+        project: testProjectId,
+        prNumber: 202,
+        title: 'Second relationship PR',
+        htmlUrl: 'https://github.com/test-org/test-repo/pull/202',
+      });
+
+      await linkIssueToPullRequest({ issue: issueA, pullRequest: pullRequestOne, actorId: testUserId });
+      await linkIssueToPullRequest({ issue: issueA, pullRequest: pullRequestTwo, actorId: testUserId });
+      const duplicate = await linkIssueToPullRequest({ issue: issueA, pullRequest: pullRequestOne, actorId: testUserId });
+      await linkIssueToPullRequest({ issue: issueB, pullRequest: pullRequestOne, actorId: testUserId });
+
+      assert.strictEqual(duplicate.created, false);
+      const refreshedIssueA = await Issue.findById(issueA._id);
+      const refreshedIssueB = await Issue.findById(issueB._id);
+      const refreshedPR = await PullRequest.findById(pullRequestOne._id);
+      assert.strictEqual(refreshedIssueA.linkedPullRequests.length, 2);
+      assert.strictEqual(refreshedIssueB.linkedPullRequests.length, 1);
+      assert.strictEqual(refreshedPR.linkedIssues.length, 2);
+      assert.strictEqual(refreshedPR.issue.toString(), issueA._id.toString());
+      assert.strictEqual(await IssuePullRequest.countDocuments({ pullRequest: pullRequestOne._id }), 2);
+
+      const activityCountBeforeAutoLink = await Activity.countDocuments({ entityId: pullRequestOne._id.toString() });
+      const automaticPR = await PullRequest.create({
+        project: testProjectId,
+        prNumber: 203,
+        title: `Fixes #${issueA.issueNumber} and fixes #${issueB.issueNumber}`,
+        body: 'Automatic many-to-many relationship fixture',
+        htmlUrl: 'https://github.com/test-org/test-repo/pull/203',
+      });
+      const automaticLinks = await linkPRToIssues({
+        pullRequest: automaticPR,
+        projectId: testProjectId,
+        projectKey: 'FLOW',
+        actorId: testUserId,
+      });
+      const duplicateAutomaticLinks = await linkPRToIssues({
+        pullRequest: automaticPR,
+        projectId: testProjectId,
+        projectKey: 'FLOW',
+        actorId: testUserId,
+      });
+
+      assert.strictEqual(automaticLinks.length, 2);
+      assert.strictEqual(duplicateAutomaticLinks.length, 0);
+      assert.strictEqual(await Activity.countDocuments({ entityId: pullRequestOne._id.toString() }), activityCountBeforeAutoLink);
+      const refreshedAutomaticPR = await PullRequest.findById(automaticPR._id);
+      assert.strictEqual(refreshedAutomaticPR.linkedIssues.length, 2);
+      assert.strictEqual(await IssuePullRequest.countDocuments({ pullRequest: automaticPR._id }), 2);
+    });
+
+    test('unlinking one relationship preserves the pull request links to other issues', async () => {
+      const issueOne = await Issue.create({
+        project: testProjectId,
+        issueNumber: 901,
+        title: 'Unlink fixture one',
+        description: 'Unlink relationship fixture',
+        reporter: testUserId,
+      });
+      const issueTwo = await Issue.create({
+        project: testProjectId,
+        issueNumber: 902,
+        title: 'Unlink fixture two',
+        description: 'Unlink relationship fixture',
+        reporter: testUserId,
+      });
+      const pullRequest = await PullRequest.create({
+        project: testProjectId,
+        prNumber: 204,
+        title: 'Unlink relationship PR',
+        htmlUrl: 'https://github.com/test-org/test-repo/pull/204',
+      });
+
+      await linkIssueToPullRequest({ issue: issueOne, pullRequest, actorId: testUserId });
+      await linkIssueToPullRequest({ issue: issueTwo, pullRequest, actorId: testUserId });
+      await unlinkPRFromIssue(issueOne._id, 204, testUserId);
+
+      const remainingPR = await PullRequest.findById(pullRequest._id);
+      const remainingIssueOne = await Issue.findById(issueOne._id);
+      const remainingIssueTwo = await Issue.findById(issueTwo._id);
+      assert.strictEqual(remainingPR.linkedIssues.length, 1);
+      assert.strictEqual(remainingPR.linkedIssues[0].toString(), issueTwo._id.toString());
+      assert.strictEqual(remainingPR.issue.toString(), issueTwo._id.toString());
+      assert.strictEqual(remainingIssueOne.linkedPullRequests.length, 0);
+      assert.strictEqual(remainingIssueTwo.linkedPullRequests.length, 1);
+      assert.strictEqual(await IssuePullRequest.countDocuments({ pullRequest: pullRequest._id }), 1);
+    });
+
+    test('relationship helper rejects cross-project issue and pull request links', async () => {
+      const otherProjectRes = await request(app)
+        .post('/api/projects')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ name: 'Relationship Boundary Project', key: 'BOUNDARY', description: 'Isolation fixture' });
+      assert.strictEqual(otherProjectRes.status, 201);
+      const otherProjectId = otherProjectRes.body.project._id;
+      const otherIssueRes = await request(app)
+        .post('/api/issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ project: otherProjectId, title: 'Boundary issue', description: 'Cannot link across projects' });
+      assert.strictEqual(otherIssueRes.status, 201);
+
+      const projectIssue = await Issue.findOne({ project: testProjectId });
+      const otherIssue = await Issue.findById(otherIssueRes.body.issue._id);
+      const projectPR = await PullRequest.create({
+        project: testProjectId,
+        repositoryOwner: 'test-org',
+        repositoryName: 'test-repo',
+        prNumber: 205,
+        title: 'Boundary PR',
+        htmlUrl: 'https://github.com/test-org/test-repo/pull/205',
+      });
+
+      await assert.rejects(
+        linkIssueToPullRequest({
+          issue: projectIssue,
+          pullRequest: projectPR,
+          actorId: testUserId,
+          repositoryOwner: 'other-org',
+          repositoryName: 'other-repo',
+        }),
+        /same repository/
+      );
+      await assert.rejects(
+        linkIssueToPullRequest({ issue: otherIssue, pullRequest: projectPR, actorId: testUserId }),
+        /same project/
+      );
+      const unchangedPR = await PullRequest.findById(projectPR._id);
+      assert.strictEqual(unchangedPR.linkedIssues.length, 0);
+      assert.ok(projectIssue);
+    });
+
+    test('merged-PR manual sync resolves linked issue and logs activity and notification', async () => {
+      const issueRes = await request(app)
+        .post('/api/issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ project: testProjectId, title: 'Manual sync merge test', description: 'Testing manual sync merge resolution' });
+      assert.strictEqual(issueRes.status, 201);
+      const issueNumber = issueRes.body.issue.issueNumber;
+      const issueId = issueRes.body.issue._id;
+
+      const project = await Project.findById(testProjectId);
+      const origGetRepoPRs = pullRequestService.getRepoPullRequests;
+      const origGetFiles = pullRequestService.getPullRequestFiles;
+      const origGetCommits = pullRequestService.getPullRequestCommits;
+
+      pullRequestService.getRepoPullRequests = async () => [
+        {
+          prNumber: 301,
+          title: `Fixes #${issueNumber} manual sync test`,
+          body: `Resolves #${issueNumber}`,
+          status: 'MERGED',
+          mergedAt: new Date().toISOString(),
+          author: { login: 'developer', avatarUrl: '' },
+          headBranch: 'feature/301',
+          baseBranch: 'main',
+          htmlUrl: 'https://github.com/test-org/test-repo/pull/301',
+        },
+      ];
+      pullRequestService.getPullRequestFiles = async () => [];
+      pullRequestService.getPullRequestCommits = async () => [];
+
+      try {
+        await pullRequestService.syncProjectPullRequests(project, testUserId);
+
+        const refreshedIssue = await Issue.findById(issueId);
+        assert.strictEqual(refreshedIssue.status, 'RESOLVED');
+
+        const prDoc = await PullRequest.findOne({ project: testProjectId, prNumber: 301 });
+        assert.ok(prDoc);
+        assert.strictEqual(prDoc.status, 'MERGED');
+
+        const mergeActivity = await Activity.findOne({
+          project: testProjectId,
+          issue: issueId,
+          entityId: prDoc._id.toString(),
+          action: 'MERGED_PR',
+        });
+        assert.ok(mergeActivity, 'Should create MERGED_PR activity');
+
+        const mergeNotification = await Notification.findOne({
+          project: testProjectId,
+          issue: issueId,
+          type: 'PR_MERGED',
+        });
+        assert.ok(mergeNotification, 'Should create PR_MERGED notification');
+      } finally {
+        pullRequestService.getRepoPullRequests = origGetRepoPRs;
+        pullRequestService.getPullRequestFiles = origGetFiles;
+        pullRequestService.getPullRequestCommits = origGetCommits;
+      }
+    });
+
+    test('manual linking of an already-merged PR resolves the issue and records activity', async () => {
+      const issueRes = await request(app)
+        .post('/api/issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ project: testProjectId, title: 'Already merged link test', description: 'Testing manual link of merged PR' });
+      assert.strictEqual(issueRes.status, 201);
+      const issueId = issueRes.body.issue._id;
+
+      const origGetDetails = pullRequestService.getPullRequestDetails;
+      pullRequestService.getPullRequestDetails = async () => ({
+        prNumber: 302,
+        title: 'Already merged pull request',
+        body: 'Done deal',
+        status: 'MERGED',
+        author: { login: 'octocat', avatarUrl: '' },
+        headBranch: 'fix/done',
+        baseBranch: 'main',
+        changedFilesCount: 1,
+        additions: 5,
+        deletions: 1,
+        htmlUrl: 'https://github.com/test-org/test-repo/pull/302',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        merged: true,
+      });
+
+      try {
+        const linkRes = await request(app)
+          .post(`/api/issues/${issueId}/github/link-pr`)
+          .set('Authorization', `Bearer ${authToken}`)
+          .send({ prNumber: 302 });
+
+        assert.strictEqual(linkRes.status, 200);
+        assert.strictEqual(linkRes.body.issue.status, 'RESOLVED');
+
+        const refreshedIssue = await Issue.findById(issueId);
+        assert.strictEqual(refreshedIssue.status, 'RESOLVED');
+
+        const prDoc = await PullRequest.findOne({ project: testProjectId, prNumber: 302 });
+        assert.ok(prDoc);
+        assert.strictEqual(prDoc.status, 'MERGED');
+
+        const mergeActivity = await Activity.findOne({
+          project: testProjectId,
+          issue: issueId,
+          entityId: prDoc._id.toString(),
+          action: 'MERGED_PR',
+        });
+        assert.ok(mergeActivity, 'Should create MERGED_PR activity on linking merged PR');
+      } finally {
+        pullRequestService.getPullRequestDetails = origGetDetails;
+      }
+    });
+
+    test('closing a PR without merging preserves issue status and never resolves it', async () => {
+      const issueRes = await request(app)
+        .post('/api/issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ project: testProjectId, title: 'Closed without merge issue', description: 'Testing unmerged closure' });
+      assert.strictEqual(issueRes.status, 201);
+      const issueNumber = issueRes.body.issue.issueNumber;
+      const issueId = issueRes.body.issue._id;
+
+      await Issue.updateOne({ _id: issueId }, { $set: { status: 'IN_PROGRESS' } });
+
+      const project = await Project.findById(testProjectId);
+      const repoOwner = project.github?.owner || 'Astha-codes16';
+      const repoName = project.github?.repository || 'Task-manager-app';
+
+      const { webhookService } = await import('../services/github/webhookService.js');
+      const res = await webhookService.handleWebhook({
+        event: 'pull_request',
+        deliveryId: 'delivery-closed-unmerged',
+        payload: {
+          action: 'closed',
+          repository: {
+            full_name: `${repoOwner}/${repoName}`,
+            name: repoName,
+            owner: { login: repoOwner },
+          },
+          pull_request: {
+            number: 303,
+            title: `Rejected PR for #${issueNumber}`,
+            body: `Fixes #${issueNumber}`,
+            html_url: `https://github.com/${repoOwner}/${repoName}/pull/303`,
+            state: 'closed',
+            merged: false,
+            user: { login: 'contributor' },
+            head: { ref: 'rejected-branch' },
+            base: { ref: 'main' },
+          },
+        },
+      });
+
+      assert.strictEqual(res.success, true);
+      const refreshedIssue = await Issue.findById(issueId);
+      assert.notStrictEqual(refreshedIssue.status, 'RESOLVED');
+      assert.strictEqual(refreshedIssue.status, 'IN_PROGRESS');
+
+      const prDoc = await PullRequest.findOne({ project: testProjectId, prNumber: 303 });
+      assert.ok(prDoc);
+      assert.strictEqual(prDoc.status, 'CLOSED');
+
+      const mergeActivity = await Activity.findOne({
+        project: testProjectId,
+        issue: issueId,
+        action: 'MERGED_PR',
+      });
+      assert.strictEqual(mergeActivity, null);
+    });
+
+    test('multiple issues linked to one merged PR are all resolved', async () => {
+      const issueARes = await request(app)
+        .post('/api/issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ project: testProjectId, title: 'Multi issue A', description: 'Multi issue A fixture' });
+      const issueBRes = await request(app)
+        .post('/api/issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ project: testProjectId, title: 'Multi issue B', description: 'Multi issue B fixture' });
+      assert.strictEqual(issueARes.status, 201);
+      assert.strictEqual(issueBRes.status, 201);
+
+      const numA = issueARes.body.issue.issueNumber;
+      const numB = issueBRes.body.issue.issueNumber;
+      const idA = issueARes.body.issue._id;
+      const idB = issueBRes.body.issue._id;
+
+      const project = await Project.findById(testProjectId);
+      const repoOwner = project.github?.owner || 'Astha-codes16';
+      const repoName = project.github?.repository || 'Task-manager-app';
+
+      const { webhookService } = await import('../services/github/webhookService.js');
+      const res = await webhookService.handleWebhook({
+        event: 'pull_request',
+        deliveryId: 'delivery-multi-issue-merge',
+        payload: {
+          action: 'closed',
+          repository: {
+            full_name: `${repoOwner}/${repoName}`,
+            name: repoName,
+            owner: { login: repoOwner },
+          },
+          pull_request: {
+            number: 304,
+            title: `Fixes #${numA} and resolves #${numB}`,
+            body: `Closes #${numA}, closes #${numB}`,
+            html_url: `https://github.com/${repoOwner}/${repoName}/pull/304`,
+            state: 'closed',
+            merged: true,
+            user: { login: 'octocat' },
+            head: { ref: 'fix-both' },
+            base: { ref: 'main' },
+          },
+        },
+      });
+
+      assert.strictEqual(res.success, true);
+      const refreshedA = await Issue.findById(idA);
+      const refreshedB = await Issue.findById(idB);
+      assert.strictEqual(refreshedA.status, 'RESOLVED');
+      assert.strictEqual(refreshedB.status, 'RESOLVED');
+
+      const prDoc = await PullRequest.findOne({ project: testProjectId, prNumber: 304 });
+      assert.strictEqual(await IssuePullRequest.countDocuments({ pullRequest: prDoc._id }), 2);
+    });
+
+    test('multiple PRs linked to one issue: unmerged closure preserves review, subsequent merge resolves', async () => {
+      const issueRes = await request(app)
+        .post('/api/issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ project: testProjectId, title: 'Multi PR single issue', description: 'Multi PR fixture' });
+      assert.strictEqual(issueRes.status, 201);
+      const issueNum = issueRes.body.issue.issueNumber;
+      const issueId = issueRes.body.issue._id;
+
+      const project = await Project.findById(testProjectId);
+      const repoOwner = project.github?.owner || 'Astha-codes16';
+      const repoName = project.github?.repository || 'Task-manager-app';
+
+      const { webhookService } = await import('../services/github/webhookService.js');
+
+      // PR 305 opened -> issue becomes IN_REVIEW
+      await webhookService.handleWebhook({
+        event: 'pull_request',
+        deliveryId: 'delivery-pr-305-open',
+        payload: {
+          action: 'opened',
+          repository: { full_name: `${repoOwner}/${repoName}`, name: repoName, owner: { login: repoOwner } },
+          pull_request: {
+            number: 305,
+            title: `Backend fix for #${issueNum}`,
+            body: `Fixes #${issueNum}`,
+            html_url: `https://github.com/${repoOwner}/${repoName}/pull/305`,
+            state: 'open',
+            merged: false,
+            user: { login: 'dev1' },
+          },
+        },
+      });
+
+      // PR 306 opened -> issue stays IN_REVIEW
+      await webhookService.handleWebhook({
+        event: 'pull_request',
+        deliveryId: 'delivery-pr-306-open',
+        payload: {
+          action: 'opened',
+          repository: { full_name: `${repoOwner}/${repoName}`, name: repoName, owner: { login: repoOwner } },
+          pull_request: {
+            number: 306,
+            title: `Frontend fix for #${issueNum}`,
+            body: `Fixes #${issueNum}`,
+            html_url: `https://github.com/${repoOwner}/${repoName}/pull/306`,
+            state: 'open',
+            merged: false,
+            user: { login: 'dev2' },
+          },
+        },
+      });
+
+      const issueAfterBothOpened = await Issue.findById(issueId);
+      assert.strictEqual(issueAfterBothOpened.status, 'IN_REVIEW');
+
+      // PR 305 closed without merge -> issue remains IN_REVIEW
+      await webhookService.handleWebhook({
+        event: 'pull_request',
+        deliveryId: 'delivery-pr-305-closed',
+        payload: {
+          action: 'closed',
+          repository: { full_name: `${repoOwner}/${repoName}`, name: repoName, owner: { login: repoOwner } },
+          pull_request: {
+            number: 305,
+            title: `Backend fix for #${issueNum}`,
+            body: `Fixes #${issueNum}`,
+            html_url: `https://github.com/${repoOwner}/${repoName}/pull/305`,
+            state: 'closed',
+            merged: false,
+            user: { login: 'dev1' },
+          },
+        },
+      });
+
+      const issueAfterFirstClosed = await Issue.findById(issueId);
+      assert.strictEqual(issueAfterFirstClosed.status, 'IN_REVIEW');
+
+      // PR 306 merged -> issue transitions to RESOLVED
+      await webhookService.handleWebhook({
+        event: 'pull_request',
+        deliveryId: 'delivery-pr-306-merged',
+        payload: {
+          action: 'closed',
+          repository: { full_name: `${repoOwner}/${repoName}`, name: repoName, owner: { login: repoOwner } },
+          pull_request: {
+            number: 306,
+            title: `Frontend fix for #${issueNum}`,
+            body: `Fixes #${issueNum}`,
+            html_url: `https://github.com/${repoOwner}/${repoName}/pull/306`,
+            state: 'closed',
+            merged: true,
+            user: { login: 'dev2' },
+          },
+        },
+      });
+
+      const issueAfterSecondMerged = await Issue.findById(issueId);
+      assert.strictEqual(issueAfterSecondMerged.status, 'RESOLVED');
+    });
+
+    test('duplicate deliveries and repeated sync are idempotent with zero duplicate activities or notifications', async () => {
+      const issueRes = await request(app)
+        .post('/api/issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ project: testProjectId, title: 'Idempotency test issue', description: 'Testing duplicate event handling' });
+      assert.strictEqual(issueRes.status, 201);
+      const issueNum = issueRes.body.issue.issueNumber;
+      const issueId = issueRes.body.issue._id;
+
+      const { pullRequestLifecycleService } = await import('../services/github/pullRequestLifecycleService.js');
+      const project = await Project.findById(testProjectId);
+
+      const pullRequest = await PullRequest.create({
+        project: testProjectId,
+        prNumber: 307,
+        title: `Fixes #${issueNum}`,
+        body: `Closes #${issueNum}`,
+        status: 'MERGED',
+        htmlUrl: 'https://github.com/test-org/test-repo/pull/307',
+      });
+
+      await pullRequestLifecycleService.syncPullRequestLifecycle({
+        project,
+        pullRequest,
+        action: 'closed',
+        isMerged: true,
+        actorId: testUserId,
+      });
+
+      const activityCountFirst = await Activity.countDocuments({
+        project: testProjectId,
+        issue: issueId,
+        entityId: pullRequest._id.toString(),
+        action: 'MERGED_PR',
+      });
+      const notificationCountFirst = await Notification.countDocuments({
+        project: testProjectId,
+        issue: issueId,
+        type: 'PR_MERGED',
+      });
+      const relationshipCountFirst = await IssuePullRequest.countDocuments({
+        project: testProjectId,
+        issue: issueId,
+        pullRequest: pullRequest._id,
+      });
+
+      assert.strictEqual(activityCountFirst, 1);
+      assert.ok(notificationCountFirst >= 1);
+      assert.strictEqual(relationshipCountFirst, 1);
+
+      await pullRequestLifecycleService.syncPullRequestLifecycle({
+        project,
+        pullRequest,
+        action: 'closed',
+        isMerged: true,
+        actorId: testUserId,
+      });
+
+      const activityCountSecond = await Activity.countDocuments({
+        project: testProjectId,
+        issue: issueId,
+        entityId: pullRequest._id.toString(),
+        action: 'MERGED_PR',
+      });
+      const notificationCountSecond = await Notification.countDocuments({
+        project: testProjectId,
+        issue: issueId,
+        type: 'PR_MERGED',
+      });
+      const relationshipCountSecond = await IssuePullRequest.countDocuments({
+        project: testProjectId,
+        issue: issueId,
+        pullRequest: pullRequest._id,
+      });
+
+      assert.strictEqual(activityCountSecond, activityCountFirst, 'No duplicate merge activity');
+      assert.strictEqual(notificationCountSecond, notificationCountFirst, 'No duplicate merge notification');
+      assert.strictEqual(relationshipCountSecond, relationshipCountFirst, 'No duplicate relationship record');
+    });
+
+    test('concurrent webhook processing and manual sync produce exactly one merge activity and notification without duplicates', async () => {
+      const issueRes = await request(app)
+        .post('/api/issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ project: testProjectId, title: 'Concurrent merge test issue', description: 'Testing concurrent webhook and sync' });
+      assert.strictEqual(issueRes.status, 201);
+      const issueNum = issueRes.body.issue.issueNumber;
+      const issueId = issueRes.body.issue._id;
+
+      const project = await Project.findById(testProjectId);
+      const repoOwner = project.github?.owner || 'Astha-codes16';
+      const repoName = project.github?.repository || 'Task-manager-app';
+
+      const { webhookService } = await import('../services/github/webhookService.js');
+      const { pullRequestLifecycleService } = await import('../services/github/pullRequestLifecycleService.js');
+
+      const origGetRepoPRs = pullRequestService.getRepoPullRequests;
+      const origGetFiles = pullRequestService.getPullRequestFiles;
+      const origGetCommits = pullRequestService.getPullRequestCommits;
+
+      pullRequestService.getRepoPullRequests = async () => [
+        {
+          prNumber: 310,
+          title: `Fixes #${issueNum} concurrent merge test`,
+          body: `Resolves #${issueNum}`,
+          status: 'MERGED',
+          mergedAt: new Date().toISOString(),
+          author: { login: 'developer', avatarUrl: '' },
+          headBranch: 'feature/310',
+          baseBranch: 'main',
+          htmlUrl: `https://github.com/${repoOwner}/${repoName}/pull/310`,
+        },
+      ];
+      pullRequestService.getPullRequestFiles = async () => [];
+      pullRequestService.getPullRequestCommits = async () => [];
+
+      try {
+        // Run webhook processing and manual sync CONCURRENTLY
+        const webhookPromise = webhookService.handleWebhook({
+          event: 'pull_request',
+          deliveryId: 'delivery-concurrent-merge-310',
+          payload: {
+            action: 'closed',
+            repository: {
+              full_name: `${repoOwner}/${repoName}`,
+              name: repoName,
+              owner: { login: repoOwner },
+            },
+            pull_request: {
+              number: 310,
+              title: `Fixes #${issueNum} concurrent merge test`,
+              body: `Resolves #${issueNum}`,
+              html_url: `https://github.com/${repoOwner}/${repoName}/pull/310`,
+              state: 'closed',
+              merged: true,
+              user: { login: 'developer' },
+              head: { ref: 'feature/310' },
+              base: { ref: 'main' },
+            },
+          },
+        });
+        const syncPromise = pullRequestService.syncProjectPullRequests(project, testUserId);
+
+        const [webhookRes, syncRes] = await Promise.all([webhookPromise, syncPromise]);
+
+        assert.strictEqual(webhookRes.success, true);
+        assert.ok(Array.isArray(syncRes) && syncRes.length === 1);
+
+        const refreshedIssue = await Issue.findById(issueId);
+        assert.strictEqual(refreshedIssue.status, 'RESOLVED');
+
+        const prDoc = await PullRequest.findOne({ project: testProjectId, prNumber: 310 });
+        assert.ok(prDoc);
+        assert.strictEqual(prDoc.status, 'MERGED');
+
+        // Verify exactly 1 Activity was created despite concurrency
+        const mergeActivities = await Activity.find({
+          project: testProjectId,
+          issue: issueId,
+          action: 'MERGED_PR',
+        });
+        assert.strictEqual(mergeActivities.length, 1, 'Exactly one MERGED_PR activity must exist after concurrent execution');
+
+        // Verify exactly 1 Notification was created per recipient despite concurrency
+        const mergeNotifications = await Notification.find({
+          project: testProjectId,
+          issue: issueId,
+          type: 'PR_MERGED',
+        });
+        assert.strictEqual(mergeNotifications.length, 1, 'Exactly one PR_MERGED notification must exist after concurrent execution');
+
+        // Repeated lifecycle processing on the same merged PR remains idempotent
+        await pullRequestLifecycleService.syncPullRequestLifecycle({
+          project,
+          pullRequest: prDoc,
+          action: 'closed',
+          isMerged: true,
+          actorId: testUserId,
+        });
+
+        const mergeActivitiesAfterRepeated = await Activity.find({
+          project: testProjectId,
+          issue: issueId,
+          action: 'MERGED_PR',
+        });
+        assert.strictEqual(mergeActivitiesAfterRepeated.length, 1, 'Repeated sync must not create duplicate MERGED_PR activity');
+
+        const mergeNotificationsAfterRepeated = await Notification.find({
+          project: testProjectId,
+          issue: issueId,
+          type: 'PR_MERGED',
+        });
+        assert.strictEqual(mergeNotificationsAfterRepeated.length, 1, 'Repeated sync must not create duplicate PR_MERGED notification');
+      } finally {
+        pullRequestService.getRepoPullRequests = origGetRepoPRs;
+        pullRequestService.getPullRequestFiles = origGetFiles;
+        pullRequestService.getPullRequestCommits = origGetCommits;
+      }
+    });
+
+    test('autoCloseOnMerge false preserves issue status and already CLOSED issues are untouched', async () => {
+      await Project.updateOne({ _id: testProjectId }, { $set: { 'settings.autoCloseOnMerge': false } });
+
+      try {
+        const issueRes = await request(app)
+          .post('/api/issues')
+          .set('Authorization', `Bearer ${authToken}`)
+          .send({ project: testProjectId, title: 'No auto-close issue', description: 'Testing autoCloseOnMerge false' });
+        assert.strictEqual(issueRes.status, 201);
+        const issueNum = issueRes.body.issue.issueNumber;
+        const issueId = issueRes.body.issue._id;
+
+        await Issue.updateOne({ _id: issueId }, { $set: { status: 'IN_REVIEW' } });
+
+        const project = await Project.findById(testProjectId);
+        const repoOwner = project.github?.owner || 'Astha-codes16';
+        const repoName = project.github?.repository || 'Task-manager-app';
+
+        const { webhookService } = await import('../services/github/webhookService.js');
+        await webhookService.handleWebhook({
+          event: 'pull_request',
+          deliveryId: 'delivery-no-autoclose',
+          payload: {
+            action: 'closed',
+            repository: { full_name: `${repoOwner}/${repoName}`, name: repoName, owner: { login: repoOwner } },
+            pull_request: {
+              number: 308,
+              title: `Fixes #${issueNum}`,
+              body: `Fixes #${issueNum}`,
+              html_url: `https://github.com/${repoOwner}/${repoName}/pull/308`,
+              state: 'closed',
+              merged: true,
+              user: { login: 'octocat' },
+            },
+          },
+        });
+
+        const refreshedIssue = await Issue.findById(issueId);
+        assert.strictEqual(refreshedIssue.status, 'IN_REVIEW', 'Issue should stay IN_REVIEW when autoCloseOnMerge is false');
+
+        await Project.updateOne({ _id: testProjectId }, { $set: { 'settings.autoCloseOnMerge': true } });
+
+        const closedIssueRes = await request(app)
+          .post('/api/issues')
+          .set('Authorization', `Bearer ${authToken}`)
+          .send({ project: testProjectId, title: 'Already closed issue', description: 'Testing CLOSED issue preservation' });
+        const closedIssueNum = closedIssueRes.body.issue.issueNumber;
+        const closedIssueId = closedIssueRes.body.issue._id;
+
+        await Issue.updateOne({ _id: closedIssueId }, { $set: { status: 'CLOSED' } });
+
+        await webhookService.handleWebhook({
+          event: 'pull_request',
+          deliveryId: 'delivery-closed-issue-merge',
+          payload: {
+            action: 'closed',
+            repository: { full_name: `${repoOwner}/${repoName}`, name: repoName, owner: { login: repoOwner } },
+            pull_request: {
+              number: 309,
+              title: `Fixes #${closedIssueNum}`,
+              body: `Fixes #${closedIssueNum}`,
+              html_url: `https://github.com/${repoOwner}/${repoName}/pull/309`,
+              state: 'closed',
+              merged: true,
+              user: { login: 'octocat' },
+            },
+          },
+        });
+
+        const refreshedClosedIssue = await Issue.findById(closedIssueId);
+        assert.strictEqual(refreshedClosedIssue.status, 'CLOSED', 'Already CLOSED issue must not be overwritten to RESOLVED');
+      } finally {
+        await Project.updateOne({ _id: testProjectId }, { $set: { 'settings.autoCloseOnMerge': true } });
       }
     });
   });

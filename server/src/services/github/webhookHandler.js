@@ -4,8 +4,9 @@ import { PullRequest } from '../../models/PullRequest.js';
 import { Issue } from '../../models/Issue.js';
 import { Activity } from '../../models/Activity.js';
 import { Notification } from '../../models/Notification.js';
-import { extractIssueNumbers } from './issueLinker.js';
+import { extractIssueNumbers, linkIssueToPullRequest } from './issueLinker.js';
 import { analyzePullRequest } from '../ai/prAnalyzer.js';
+import { pullRequestLifecycleService } from './pullRequestLifecycleService.js';
 
 /**
  * Verify GitHub webhook HMAC-SHA256 signature
@@ -73,8 +74,18 @@ async function handlePullRequestEvent(payload, project) {
     prNumber: prData.number,
   });
 
+  if (
+    pullRequest &&
+    ((pullRequest.repositoryOwner && pullRequest.repositoryOwner.toLowerCase() !== repoOwner.toLowerCase()) ||
+      (pullRequest.repositoryName && pullRequest.repositoryName.toLowerCase() !== repoName.toLowerCase()))
+  ) {
+    throw new Error(`Pull Request #${prData.number} belongs to a different repository.`);
+  }
+
   const prFields = {
     project: project._id,
+    repositoryOwner: repoOwner,
+    repositoryName: repoName,
     prNumber: prData.number,
     title: prData.title,
     body: prData.body || '',
@@ -98,81 +109,19 @@ async function handlePullRequestEvent(payload, project) {
     await pullRequest.save();
   }
 
-  // Detect issue references in PR title or body
-  const combinedText = `${prData.title} ${prData.body || ''}`;
-  const issueNumbers = extractIssueNumbers(combinedText);
-
-  if (issueNumbers.length > 0) {
-    const linkedIssues = await Issue.find({
-      project: project._id,
-      issueNumber: { $in: issueNumbers },
-    });
-
-    for (const issue of linkedIssues) {
-      if (!issue.linkedPullRequests.includes(pullRequest._id)) {
-        issue.linkedPullRequests.push(pullRequest._id);
-      }
-
-      // If PR was merged, update issue status to RESOLVED if configured
-      if (isMerged && project.settings?.autoCloseOnMerge !== false) {
-        issue.status = 'RESOLVED';
-      } else if (action === 'opened' || action === 'synchronize') {
-        if (issue.status === 'OPEN' || issue.status === 'IN_PROGRESS') {
-          issue.status = 'IN_REVIEW';
-        }
-      }
-
-      await issue.save();
-
-      // Ensure issue link is saved on the PR
-      pullRequest.issue = issue._id;
-      await pullRequest.save();
-
-      // Trigger automatic AI PR analysis if newly opened/updated
-      if (action === 'opened' || action === 'synchronize' || !pullRequest.aiAnalysis?.summary) {
-        const analysis = await analyzePullRequest({ issue, pullRequest });
-        pullRequest.aiAnalysis = analysis;
-        await pullRequest.save();
-      }
-
-      // Record Activity
-      await Activity.create({
-        project: project._id,
-        issue: issue._id,
-        actor: project.owner,
-        action: isMerged ? 'MERGED_PR' : action === 'opened' ? 'LINKED_PR' : 'UPDATED_PR',
-        entityType: 'PR',
-        entityId: pullRequest._id.toString(),
-        metadata: {
-          prNumber: pullRequest.prNumber,
-          prTitle: pullRequest.title,
-          isMerged,
-          action,
-        },
-      });
-
-      // Notification
-      const recipient = issue.assignee || issue.reporter || project.owner;
-      if (recipient) {
-        await Notification.create({
-          recipient,
-          sender: project.owner,
-          project: project._id,
-          issue: issue._id,
-          title: isMerged ? `PR #${pullRequest.prNumber} Merged` : `PR #${pullRequest.prNumber} Updated`,
-          message: isMerged
-            ? `Pull Request #${pullRequest.prNumber} was merged and Issue #${issue.issueNumber} was marked RESOLVED!`
-            : `Pull Request #${pullRequest.prNumber} ("${pullRequest.title}") status changed: ${action}`,
-          type: isMerged ? 'PR_MERGED' : 'PR_LINKED',
-        });
-      }
-    }
-  }
+  const lifecycleResult = await pullRequestLifecycleService.syncPullRequestLifecycle({
+    project,
+    pullRequest,
+    action,
+    isMerged,
+    actorId: project.owner,
+    changedFiles: prData.changed_files,
+  });
 
   return {
     success: true,
     message: `Processed PR #${prData.number} (${action})`,
     pullRequest,
-    linkedIssueNumbers: issueNumbers,
+    linkedIssueNumbers: lifecycleResult.linkedIssueNumbers,
   };
 }

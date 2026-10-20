@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { Issue } from '../../models/Issue.js';
 import { PullRequest } from '../../models/PullRequest.js';
+import { IssuePullRequest } from '../../models/IssuePullRequest.js';
 import { Activity } from '../../models/Activity.js';
 import { Notification } from '../../models/Notification.js';
 
@@ -30,6 +31,92 @@ export function extractIssueNumbers(text, projectKey = null) {
   return Array.from(numbers);
 }
 
+const sameId = (left, right) => left?.toString() === right?.toString();
+
+const relationshipError = (message) => {
+  const error = new Error(message);
+  error.statusCode = 404;
+  return error;
+};
+
+export async function linkIssueToPullRequest({
+  issue,
+  pullRequest,
+  actorId = null,
+  transitionStatus = true,
+  repositoryOwner = null,
+  repositoryName = null,
+}) {
+  if (!issue || !pullRequest || !sameId(issue.project, pullRequest.project)) {
+    throw relationshipError('Issue and pull request must belong to the same project.');
+  }
+  if (
+    (repositoryOwner && pullRequest.repositoryOwner && repositoryOwner.toLowerCase() !== pullRequest.repositoryOwner.toLowerCase()) ||
+    (repositoryName && pullRequest.repositoryName && repositoryName.toLowerCase() !== pullRequest.repositoryName.toLowerCase())
+  ) {
+    throw relationshipError('Issue and pull request must belong to the same repository.');
+  }
+
+  if (repositoryOwner && !pullRequest.repositoryOwner) pullRequest.repositoryOwner = repositoryOwner;
+  if (repositoryName && !pullRequest.repositoryName) pullRequest.repositoryName = repositoryName;
+
+  const issueLinks = issue.linkedPullRequests || [];
+  const pullRequestLinks = pullRequest.linkedIssues || [];
+  const legacyLinked = issueLinks.some((id) => sameId(id, pullRequest._id)) ||
+    pullRequestLinks.some((id) => sameId(id, issue._id)) ||
+    sameId(pullRequest.issue, issue._id);
+  let relationshipCreated = true;
+
+  try {
+    await IssuePullRequest.create({
+      project: issue.project,
+      issue: issue._id,
+      pullRequest: pullRequest._id,
+    });
+  } catch (error) {
+    if (error.code !== 11000) throw error;
+    relationshipCreated = false;
+  }
+
+  if (!issueLinks.some((id) => sameId(id, pullRequest._id))) {
+    issue.linkedPullRequests = [...issueLinks, pullRequest._id];
+  }
+  if (!pullRequestLinks.some((id) => sameId(id, issue._id))) {
+    pullRequest.linkedIssues = [...pullRequestLinks, issue._id];
+  }
+  if (transitionStatus && !legacyLinked && relationshipCreated && ['OPEN', 'IN_PROGRESS'].includes(issue.status)) {
+    issue.status = 'IN_REVIEW';
+  }
+
+  await Promise.all([
+    Issue.updateOne({ _id: issue._id, project: issue.project }, { $addToSet: { linkedPullRequests: pullRequest._id } }),
+    PullRequest.updateOne({ _id: pullRequest._id, project: pullRequest.project }, { $addToSet: { linkedIssues: issue._id } }),
+    transitionStatus && !legacyLinked && relationshipCreated
+      ? Issue.updateOne({ _id: issue._id, status: { $in: ['OPEN', 'IN_PROGRESS'] } }, { $set: { status: 'IN_REVIEW' } })
+      : Promise.resolve(),
+  ]);
+
+  if (!pullRequest.issue) {
+    const firstRelationship = await IssuePullRequest.findOne({
+      project: pullRequest.project,
+      pullRequest: pullRequest._id,
+    }).sort({ createdAt: 1 });
+    if (firstRelationship) {
+      await PullRequest.updateOne(
+        { _id: pullRequest._id, project: pullRequest.project },
+        { $set: { issue: firstRelationship.issue } }
+      );
+      pullRequest.issue = firstRelationship.issue;
+    }
+  }
+
+  const [updatedIssue, updatedPullRequest] = await Promise.all([
+    Issue.findById(issue._id),
+    PullRequest.findById(pullRequest._id),
+  ]);
+  return { created: !legacyLinked && relationshipCreated, issue: updatedIssue, pullRequest: updatedPullRequest };
+}
+
 /**
  * Links a PullRequest document with matching issues in the project
  */
@@ -47,51 +134,67 @@ export async function linkPRToIssues({ pullRequest, projectId, projectKey = null
   const linkedIssues = [];
 
   for (const issue of matchedIssues) {
-    if (!issue.linkedPullRequests.includes(pullRequest._id)) {
-      issue.linkedPullRequests.push(pullRequest._id);
+    const relationship = await linkIssueToPullRequest({
+      issue,
+      pullRequest,
+      actorId,
+      repositoryOwner: pullRequest.repositoryOwner,
+      repositoryName: pullRequest.repositoryName,
+    });
+    if (!relationship.created) continue;
 
-      // Transition to IN_REVIEW if currently OPEN
-      if (issue.status === 'OPEN' || issue.status === 'IN_PROGRESS') {
-        issue.status = 'IN_REVIEW';
-      }
-
-      await issue.save();
-      linkedIssues.push(issue);
-
-      // Associate issue on PR
-      if (!pullRequest.issue) {
-        pullRequest.issue = issue._id;
-        await pullRequest.save();
-      }
-
-      // Log Activity
-      await Activity.create({
+    linkedIssues.push(issue);
+    await Activity.findOneAndUpdate(
+      {
         project: projectId,
         issue: issue._id,
-        actor: actorId || issue.reporter,
-        action: 'LINKED_PR',
         entityType: 'PR',
         entityId: pullRequest._id.toString(),
-        metadata: {
-          prNumber: pullRequest.prNumber,
-          prTitle: pullRequest.title,
-          htmlUrl: pullRequest.htmlUrl,
-        },
-      });
-
-      // Send Notification to assignee / reporter
-      const notifyTarget = issue.assignee || issue.reporter;
-      if (notifyTarget && notifyTarget.toString() !== actorId?.toString()) {
-        await Notification.create({
-          recipient: notifyTarget,
-          sender: actorId || issue.reporter,
+        action: 'LINKED_PR',
+      },
+      {
+        $setOnInsert: {
           project: projectId,
           issue: issue._id,
-          title: `PR #${pullRequest.prNumber} Linked`,
-          message: `GitHub Pull Request #${pullRequest.prNumber} "${pullRequest.title}" was linked to Issue #${issue.issueNumber}`,
+          actor: actorId || issue.reporter,
+          action: 'LINKED_PR',
+          entityType: 'PR',
+          entityId: pullRequest._id.toString(),
+          metadata: {
+            prNumber: pullRequest.prNumber,
+            prTitle: pullRequest.title,
+            htmlUrl: pullRequest.htmlUrl,
+          },
+          timestamp: new Date(),
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    const notifyTarget = issue.assignee || issue.reporter;
+    if (notifyTarget && notifyTarget.toString() !== actorId?.toString()) {
+      await Notification.findOneAndUpdate(
+        {
+          recipient: notifyTarget,
+          project: projectId,
+          issue: issue._id,
           type: 'PR_LINKED',
-        });
-      }
+          title: `PR #${pullRequest.prNumber} Linked`,
+        },
+        {
+          $setOnInsert: {
+            recipient: notifyTarget,
+            sender: actorId || issue.reporter,
+            project: projectId,
+            issue: issue._id,
+            title: `PR #${pullRequest.prNumber} Linked`,
+            message: `GitHub Pull Request #${pullRequest.prNumber} "${pullRequest.title}" was linked to Issue #${issue.issueNumber}`,
+            type: 'PR_LINKED',
+            read: false,
+          },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
     }
   }
 
@@ -124,7 +227,7 @@ export async function manualLinkPR(issueId, prIdentifier, actorId) {
   }
 
   if (!pullRequest && mongoose.Types.ObjectId.isValid(strVal)) {
-    pullRequest = await PullRequest.findById(strVal);
+    pullRequest = await PullRequest.findOne({ _id: strVal, project: issue.project });
   }
 
   if (!pullRequest) {
@@ -133,28 +236,35 @@ export async function manualLinkPR(issueId, prIdentifier, actorId) {
     throw error;
   }
 
-  if (!issue.linkedPullRequests.includes(pullRequest._id)) {
-    issue.linkedPullRequests.push(pullRequest._id);
-    if (issue.status === 'OPEN') issue.status = 'IN_REVIEW';
-    await issue.save();
-  }
+  const relationship = await linkIssueToPullRequest({ issue, pullRequest, actorId });
+  if (!relationship.created) return relationship;
 
-  pullRequest.issue = issue._id;
-  await pullRequest.save();
-
-  await Activity.create({
-    project: issue.project,
-    issue: issue._id,
-    actor: actorId,
-    action: 'LINKED_PR',
-    entityType: 'PR',
-    entityId: pullRequest._id.toString(),
-    metadata: {
-      prNumber: pullRequest.prNumber,
-      prTitle: pullRequest.title,
-      htmlUrl: pullRequest.htmlUrl,
+  await Activity.findOneAndUpdate(
+    {
+      project: issue.project,
+      issue: issue._id,
+      entityType: 'PR',
+      entityId: pullRequest._id.toString(),
+      action: 'LINKED_PR',
     },
-  });
+    {
+      $setOnInsert: {
+        project: issue.project,
+        issue: issue._id,
+        actor: actorId,
+        action: 'LINKED_PR',
+        entityType: 'PR',
+        entityId: pullRequest._id.toString(),
+        metadata: {
+          prNumber: pullRequest.prNumber,
+          prTitle: pullRequest.title,
+          htmlUrl: pullRequest.htmlUrl,
+        },
+        timestamp: new Date(),
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
 
   return { issue, pullRequest };
 }
@@ -187,15 +297,42 @@ export async function unlinkPRFromIssue(issueId, prNumber, actorId) {
     throw error;
   }
 
-  issue.linkedPullRequests = issue.linkedPullRequests.filter(
-    (id) => id.toString() !== pullRequest._id.toString()
-  );
-  await issue.save();
-
-  if (pullRequest.issue && pullRequest.issue.toString() === issue._id.toString()) {
-    pullRequest.issue = null;
-    await pullRequest.save();
+  const issueWasLinked = (issue.linkedPullRequests || []).some((id) => sameId(id, pullRequest._id));
+  const pullRequestWasLinked = (pullRequest.linkedIssues || []).some((id) => sameId(id, issue._id));
+  const legacyWasLinked = sameId(pullRequest.issue, issue._id);
+  const relationship = await IssuePullRequest.exists({
+    project: issue.project,
+    issue: issue._id,
+    pullRequest: pullRequest._id,
+  });
+  if (!issueWasLinked && !pullRequestWasLinked && !legacyWasLinked && !relationship) {
+    return { issue, pullRequest, removed: false };
   }
+
+  await Promise.all([
+    IssuePullRequest.deleteOne({
+      project: issue.project,
+      issue: issue._id,
+      pullRequest: pullRequest._id,
+    }),
+    Issue.updateOne(
+      { _id: issue._id, project: issue.project },
+      { $pull: { linkedPullRequests: pullRequest._id } }
+    ),
+    PullRequest.updateOne(
+      { _id: pullRequest._id, project: issue.project },
+      { $pull: { linkedIssues: issue._id } }
+    ),
+  ]);
+
+  const updatedPullRequest = await PullRequest.findById(pullRequest._id);
+  if (legacyWasLinked) {
+    await PullRequest.updateOne(
+      { _id: pullRequest._id, issue: issue._id },
+      { $set: { issue: updatedPullRequest.linkedIssues?.[0] || null } }
+    );
+  }
+  const updatedIssue = await Issue.findById(issue._id);
 
   await Activity.create({
     project: issue.project,
@@ -207,5 +344,9 @@ export async function unlinkPRFromIssue(issueId, prNumber, actorId) {
     metadata: { prNumber: pullRequest.prNumber },
   });
 
-  return { issue, pullRequest };
+  return {
+    issue: updatedIssue,
+    pullRequest: await PullRequest.findById(pullRequest._id),
+    removed: true,
+  };
 }

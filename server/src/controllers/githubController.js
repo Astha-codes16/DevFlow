@@ -9,7 +9,12 @@ import { Notification } from '../models/Notification.js';
 import { repositoryService } from '../services/github/repositoryService.js';
 import { pullRequestService } from '../services/github/pullRequestService.js';
 import { webhookService } from '../services/github/webhookService.js';
-import { manualLinkPR, unlinkPRFromIssue } from '../services/github/issueLinker.js';
+import {
+  linkIssueToPullRequest,
+  manualLinkPR,
+  unlinkPRFromIssue,
+} from '../services/github/issueLinker.js';
+import { pullRequestLifecycleService } from '../services/github/pullRequestLifecycleService.js';
 import { requireProjectAccess as verifyProjectAccess } from '../middleware/projectAccess.js';
 
 /**
@@ -424,7 +429,8 @@ export const linkPullRequestToIssue = async (req, res, next) => {
     if (!pullRequest) {
       pullRequest = await PullRequest.create({
         project: project._id,
-        issue: issue._id,
+        repositoryOwner: owner,
+        repositoryName: repo,
         prNumber: ghPRDetails.prNumber,
         title: ghPRDetails.title,
         body: ghPRDetails.body || '',
@@ -437,7 +443,14 @@ export const linkPullRequestToIssue = async (req, res, next) => {
         updatedAt: ghPRDetails.updatedAt,
       });
     } else {
-      pullRequest.issue = issue._id;
+      if (
+        (pullRequest.repositoryOwner && pullRequest.repositoryOwner.toLowerCase() !== owner.toLowerCase()) ||
+        (pullRequest.repositoryName && pullRequest.repositoryName.toLowerCase() !== repo.toLowerCase())
+      ) {
+        return res.status(404).json({ success: false, message: 'Pull Request belongs to a different repository.' });
+      }
+      pullRequest.repositoryOwner = owner;
+      pullRequest.repositoryName = repo;
       pullRequest.title = ghPRDetails.title;
       pullRequest.body = ghPRDetails.body || pullRequest.body;
       pullRequest.status = ghPRDetails.status;
@@ -445,47 +458,78 @@ export const linkPullRequestToIssue = async (req, res, next) => {
       await pullRequest.save();
     }
 
-    // 7. Ensure issue has PR in linkedPullRequests
-    const alreadyLinked = issue.linkedPullRequests.some(
-      (id) => id.toString() === pullRequest._id.toString()
-    );
-
-    if (!alreadyLinked) {
-      issue.linkedPullRequests.push(pullRequest._id);
-      if (issue.status === 'OPEN') {
-        issue.status = 'IN_REVIEW';
-      }
-      await issue.save();
-    }
-
-    // 8. Log activity
-    await Activity.create({
-      project: project._id,
-      issue: issue._id,
-      actor: req.user._id,
-      action: 'LINKED_PR',
-      entityType: 'PR',
-      entityId: pullRequest._id.toString(),
-      metadata: {
-        prNumber: pullRequest.prNumber,
-        prTitle: pullRequest.title,
-        htmlUrl: pullRequest.htmlUrl,
-      },
+    const relationship = await linkIssueToPullRequest({
+      issue,
+      pullRequest,
+      actorId: req.user._id,
+      repositoryOwner: owner,
+      repositoryName: repo,
     });
 
-    // 9. Send notification to assignee or reporter if different from actor
-    const notifyTarget = issue.assignee || issue.reporter;
-    if (notifyTarget && notifyTarget.toString() !== req.user._id.toString()) {
-      await Notification.create({
-        recipient: notifyTarget,
-        sender: req.user._id,
-        project: project._id,
-        issue: issue._id,
-        title: `PR #${pullRequest.prNumber} Linked`,
-        message: `${req.user.name || 'A team member'} linked GitHub PR #${pullRequest.prNumber} "${pullRequest.title}" to Issue #${issue.issueNumber}`,
-        type: 'PR_LINKED',
-      });
+    if (relationship.created) {
+      await Activity.findOneAndUpdate(
+        {
+          project: project._id,
+          issue: issue._id,
+          entityType: 'PR',
+          entityId: pullRequest._id.toString(),
+          action: 'LINKED_PR',
+        },
+        {
+          $setOnInsert: {
+            project: project._id,
+            issue: issue._id,
+            actor: req.user._id,
+            action: 'LINKED_PR',
+            entityType: 'PR',
+            entityId: pullRequest._id.toString(),
+            metadata: {
+              prNumber: pullRequest.prNumber,
+              prTitle: pullRequest.title,
+              htmlUrl: pullRequest.htmlUrl,
+            },
+            timestamp: new Date(),
+          },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+
+      const notifyTarget = issue.assignee || issue.reporter;
+      if (notifyTarget && notifyTarget.toString() !== req.user._id.toString()) {
+        await Notification.findOneAndUpdate(
+          {
+            recipient: notifyTarget,
+            project: project._id,
+            issue: issue._id,
+            type: 'PR_LINKED',
+            title: `PR #${pullRequest.prNumber} Linked`,
+          },
+          {
+            $setOnInsert: {
+              recipient: notifyTarget,
+              sender: req.user._id,
+              project: project._id,
+              issue: issue._id,
+              title: `PR #${pullRequest.prNumber} Linked`,
+              message: `${req.user.name || 'A team member'} linked GitHub PR #${pullRequest.prNumber} "${pullRequest.title}" to Issue #${issue.issueNumber}`,
+              type: 'PR_LINKED',
+              read: false,
+            },
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+      }
     }
+
+    const isMerged = Boolean(ghPRDetails.merged || ghPRDetails.status === 'MERGED' || pullRequest.status === 'MERGED');
+
+    await pullRequestLifecycleService.syncPullRequestLifecycle({
+      project,
+      pullRequest,
+      action: 'manual_link',
+      isMerged,
+      actorId: req.user._id,
+    });
 
     // 10. Re-fetch and populate issue for fresh client state
     const populatedIssue = await Issue.findById(issue._id)
@@ -531,25 +575,7 @@ export const unlinkPullRequestFromIssue = async (req, res, next) => {
     });
 
     if (pullRequest) {
-      issue.linkedPullRequests = issue.linkedPullRequests.filter(
-        (id) => id.toString() !== pullRequest._id.toString()
-      );
-      await issue.save();
-
-      if (pullRequest.issue && pullRequest.issue.toString() === issue._id.toString()) {
-        pullRequest.issue = null;
-        await pullRequest.save();
-      }
-
-      await Activity.create({
-        project: issue.project,
-        issue: issue._id,
-        actor: req.user._id,
-        action: 'UNLINKED_PR',
-        entityType: 'PR',
-        entityId: pullRequest._id.toString(),
-        metadata: { prNumber: pullRequest.prNumber },
-      });
+      await unlinkPRFromIssue(issueId, num, req.user._id);
     }
 
     const populatedIssue = await Issue.findById(issue._id)

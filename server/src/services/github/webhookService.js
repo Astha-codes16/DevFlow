@@ -6,9 +6,10 @@ import { Issue } from '../../models/Issue.js';
 import { Activity } from '../../models/Activity.js';
 import { Notification } from '../../models/Notification.js';
 import { WebhookDelivery } from '../../models/WebhookDelivery.js';
-import { extractIssueNumbers } from './issueLinker.js';
+import { extractIssueNumbers, linkIssueToPullRequest } from './issueLinker.js';
 import { analyzePullRequest } from '../ai/prAnalyzer.js';
 import { pullRequestService } from './pullRequestService.js';
+import { pullRequestLifecycleService } from './pullRequestLifecycleService.js';
 
 export class WebhookService {
   /**
@@ -152,6 +153,8 @@ export class WebhookService {
   async handlePullRequestEvent(payload, project) {
     const action = payload.action;
     const prData = payload.pull_request;
+    const repoOwner = payload.repository?.owner?.login || project.github?.owner || project.githubRepository?.owner;
+    const repoName = payload.repository?.name || project.github?.repository || project.githubRepository?.repo;
     const isMerged = Boolean(prData.merged);
 
     let status = 'OPEN';
@@ -169,8 +172,18 @@ export class WebhookService {
       prNumber: prData.number,
     });
 
+    if (
+      pullRequest &&
+      ((pullRequest.repositoryOwner && pullRequest.repositoryOwner.toLowerCase() !== repoOwner.toLowerCase()) ||
+        (pullRequest.repositoryName && pullRequest.repositoryName.toLowerCase() !== repoName.toLowerCase()))
+    ) {
+      throw new Error(`Pull Request #${prData.number} belongs to a different repository.`);
+    }
+
     const updateFields = {
       project: project._id,
+      repositoryOwner: repoOwner,
+      repositoryName: repoName,
       prNumber: prData.number,
       title: prData.title,
       body: prData.body || '',
@@ -194,90 +207,21 @@ export class WebhookService {
       await pullRequest.save();
     }
 
-    // Extract referenced issue numbers
-    const combinedText = `${prData.title} ${prData.body || ''}`;
-    const issueNumbers = extractIssueNumbers(combinedText, project.key);
-
-    const matchedIssues = await Issue.find({
-      project: project._id,
-      issueNumber: { $in: issueNumbers },
+    const lifecycleResult = await pullRequestLifecycleService.syncPullRequestLifecycle({
+      project,
+      pullRequest,
+      action,
+      isMerged,
+      actorId: project.owner,
+      changedFiles: prData.changed_files,
     });
-
-    for (const issue of matchedIssues) {
-      if (!issue.linkedPullRequests.includes(pullRequest._id)) {
-        issue.linkedPullRequests.push(pullRequest._id);
-      }
-
-      pullRequest.issue = issue._id;
-      await pullRequest.save();
-
-      // State Transitions based on PR event
-      if (isMerged && project.settings?.autoCloseOnMerge !== false) {
-        issue.status = 'RESOLVED';
-      } else if (action === 'opened' || action === 'reopened') {
-        if (issue.status === 'OPEN') {
-          issue.status = 'IN_REVIEW';
-        }
-      }
-
-      await issue.save();
-
-      // Activity Logging
-      await Activity.create({
-        project: project._id,
-        issue: issue._id,
-        actor: project.owner,
-        action: isMerged ? 'MERGED_PR' : action === 'opened' ? 'LINKED_PR' : 'UPDATED_PR',
-        entityType: 'PR',
-        entityId: pullRequest._id.toString(),
-        metadata: {
-          prNumber: pullRequest.prNumber,
-          prTitle: pullRequest.title,
-          action,
-          isMerged,
-          htmlUrl: pullRequest.htmlUrl,
-        },
-      });
-
-      // Notify Assignee and Reporter
-      const notifyUsers = new Set([issue.assignee?.toString(), issue.reporter?.toString()]);
-      for (const recipientId of notifyUsers) {
-        if (recipientId) {
-          await Notification.create({
-            recipient: recipientId,
-            sender: project.owner,
-            project: project._id,
-            issue: issue._id,
-            title: isMerged ? `PR #${pullRequest.prNumber} Merged` : `PR #${pullRequest.prNumber} ${action}`,
-            message: isMerged
-              ? `PR #${pullRequest.prNumber} was merged! Issue #${issue.issueNumber} automatically moved to RESOLVED.`
-              : `PR #${pullRequest.prNumber} ("${pullRequest.title}") status updated to ${status}.`,
-            type: isMerged ? 'PR_MERGED' : 'PR_LINKED',
-          });
-        }
-      }
-
-      // Run AI PR Analysis if opened or synchronize
-      if (action === 'opened' || action === 'synchronize' || !pullRequest.aiAnalysis?.summary) {
-        try {
-          const analysis = await analyzePullRequest({
-            issue,
-            pullRequest,
-          });
-          pullRequest.aiAnalysis = analysis;
-          await pullRequest.save();
-        } catch (aiErr) {
-          console.warn(`[WebhookService] AI PR analysis failed: ${aiErr.message}`);
-        }
-      }
-    }
 
     return {
       success: true,
       message: `Processed PR #${prData.number} (${action})`,
       prNumber: prData.number,
-      status,
-      linkedIssues: issueNumbers,
+      status: pullRequest.status,
+      linkedIssues: lifecycleResult.linkedIssueNumbers,
     };
   }
 
